@@ -220,11 +220,26 @@
 
   // ---------------------------------------------------------------- micro:bit messages
   const recent = new Map(); // dedupe: the project micro:bits send every message twice
+  let garbleTimes = [], garbleWarned = 0;
+  const name0 = (m) => m[1];
   function fromMicrobit(raw) {
     const line = raw.trim();
     if (!line) return;
     const m = LINE_RE.exec(line);
-    if (!m) { log("sys", "ignored: " + line.slice(0, 60)); return; }
+    // garbled text (missing letters, two lines stuck together) means something else is reading the same USB port
+    const garbled = !m || (name0(m) !== "gateway" && /^g?a?t?e?w?a?y?$/.test(name0(m)) && name0(m).length >= 4);
+    if (garbled) {
+      log("sys", "ignored: " + line.slice(0, 60));
+      garbleTimes.push(Date.now());
+      garbleTimes = garbleTimes.filter((t) => t > Date.now() - 30000);
+      if (garbleTimes.length >= 3 && Date.now() - garbleWarned > 60000) {
+        garbleWarned = Date.now();
+        log("err", "Messages from the micro:bit are arriving garbled. Usually another program is reading the same USB port: " +
+                   "close every MakeCode tab (or press Disconnect in MakeCode), then unplug and replug the gateway micro:bit.");
+        light("usb", "bad", "Garbled data — close MakeCode, then replug the micro:bit");
+      }
+      return;
+    }
     const [, name, cmd] = m;
     if (name === "gateway") {
       if ((cmd === "READY" || cmd === "ALIVE") && !gatewayReady) {
