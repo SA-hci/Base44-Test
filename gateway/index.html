@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Exhibit Gateway</title>
+<style>
+  :root {
+    --bg: #f4f2ee; --card: #fff; --ink: #1d1c1a; --muted: #6d6a63; --line: #e2ded5;
+    --ok: #1f8a4c; --bad: #c0392b; --warn: #b7791f; --accent: #c2410c; --code: #f7f5f0;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #141312; --card: #1e1d1b; --ink: #f1eee8; --muted: #a29e95; --line: #34322e;
+            --ok: #4cc27f; --bad: #ef6b5b; --warn: #e3a64a; --accent: #f08a4b; --code: #161514; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.45 system-ui, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 1100px; margin: 0 auto; padding: 20px 16px 40px; display: grid; gap: 16px;
+         grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+  header { grid-column: 1 / -1; display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  h1 { font-size: 1.4rem; margin: 0; }
+  header p { margin: 0; color: var(--muted); }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px; min-width: 0; }
+  section.wide { grid-column: 1 / -1; }
+  h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 0 0 12px; }
+  .status { display: flex; align-items: center; gap: 10px; font-weight: 600; margin-bottom: 12px; }
+  .light { width: 12px; height: 12px; border-radius: 50%; background: var(--muted); flex: none; }
+  .light.ok { background: var(--ok); } .light.bad { background: var(--bad); } .light.warn { background: var(--warn); }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  input { font: inherit; padding: 9px 11px; border-radius: 9px; border: 1px solid var(--line);
+          background: var(--bg); color: var(--ink); min-width: 0; flex: 1; }
+  button { font: inherit; font-weight: 600; border: 0; border-radius: 9px; padding: 9px 14px; cursor: pointer;
+           background: var(--accent); color: #fff; }
+  button.secondary { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+  button:disabled { opacity: .45; cursor: default; }
+  .hint { color: var(--muted); font-size: .85rem; margin: 10px 0 0; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 8px 6px; border-top: 1px solid var(--line); vertical-align: top; }
+  th { font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); border-top: 0; }
+  td.mono, .mono { font-family: ui-monospace, Consolas, monospace; font-size: .85rem; }
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 99px; font-size: .8rem; font-weight: 600;
+          background: var(--code); border: 1px solid var(--line); }
+  .pill.ok { color: var(--ok); border-color: currentColor; }
+  #log { background: var(--code); border: 1px solid var(--line); border-radius: 10px; height: 280px; overflow: auto;
+         padding: 8px 10px; margin: 0; white-space: pre-wrap; word-break: break-word; }
+  .in { color: var(--accent); } .out { color: var(--ok); } .err { color: var(--bad); } .sys { color: var(--muted); }
+  .empty { color: var(--muted); font-style: italic; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Exhibit gateway</h1>
+    <p>Keep this page open on the laptop during the exhibition. The gateway micro:bit stays plugged in by USB.</p>
+  </header>
+
+  <section>
+    <h2>1 · Ably (internet relay)</h2>
+    <div class="status"><span class="light" id="ablyLight"></span><span id="ablyStatus">Not connected</span></div>
+    <div class="row">
+      <input id="key" style="flex-basis:100%" type="password" autocomplete="off" placeholder="Full Ably key (Root) — xxxx.yyyy:zzzz">
+      <button id="saveKey">Connect</button>
+      <button id="forgetKey" class="secondary">Forget key</button>
+    </div>
+    <p class="hint">Use the full (Root) key here. It's saved only in this laptop's browser, never on GitHub.</p>
+  </section>
+
+  <section>
+    <h2>2 · Gateway micro:bit (USB)</h2>
+    <div class="status"><span class="light" id="usbLight"></span><span id="usbStatus">Not connected</span></div>
+    <div class="row">
+      <button id="connectUsb">Connect micro:bit</button>
+      <button id="disconnectUsb" class="secondary" disabled>Disconnect</button>
+    </div>
+    <p class="hint" id="usbHint">Chrome or Edge only. After the first time, the page reconnects by itself when the micro:bit is plugged in.</p>
+  </section>
+
+  <section class="wide">
+    <h2>Projects</h2>
+    <table>
+      <thead><tr><th>Project</th><th>Phone</th><th>Last from micro:bit</th><th>Last to micro:bit</th></tr></thead>
+      <tbody id="projects"><tr><td colspan="4" class="empty">No activity yet. Projects appear here when their micro:bit or a phone sends something.</td></tr></tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Test without hardware</h2>
+    <div class="row">
+      <input id="fakeIn" class="mono" value="leaves:BLOW" aria-label="Pretend a micro:bit sent">
+      <button id="fakeInBtn" class="secondary">Pretend micro:bit sent</button>
+    </div>
+    <p class="hint">Acts as if a project micro:bit sent this by radio, so phones react.</p>
+    <div class="row" style="margin-top:12px">
+      <input id="fakeOut" class="mono" value="leaves:PLACED" aria-label="Send to micro:bits">
+      <button id="fakeOutBtn" class="secondary">Send to micro:bits</button>
+    </div>
+    <p class="hint">Sends this out over the gateway's radio.</p>
+  </section>
+
+  <section>
+    <h2>Log</h2>
+    <pre id="log" class="mono"></pre>
+    <div class="row" style="margin-top:8px"><button id="clearLog" class="secondary">Clear</button></div>
+  </section>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/ably@2.4.0/build/ably.min.js"></script>
+<script>
+(() => {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  const KEY_STORE = "exhibitGatewayAblyKey";
+  const LINE_RE = /^([a-z0-9-]{1,10}):([A-Z0-9_]{1,8})$/;
+  const MICROBIT_VENDOR = 0x0d28;
+
+  // ---------------------------------------------------------------- log
+  function log(kind, text) {
+    const el = $("log");
+    const span = document.createElement("span");
+    span.className = kind;
+    span.textContent = `${new Date().toLocaleTimeString()}  ${{ in: "radio →", out: "→ radio", err: "error ", sys: "" }[kind] || ""} ${text}\n`;
+    el.appendChild(span);
+    while (el.childNodes.length > 400) el.removeChild(el.firstChild);
+    el.scrollTop = el.scrollHeight;
+  }
+  $("clearLog").onclick = () => ($("log").textContent = "");
+  const light = (id, kind, text) => { $(id + "Light").className = "light " + kind; $(id + "Status").textContent = text; };
+
+  // ---------------------------------------------------------------- projects table
+  const projects = new Map(); // name -> {phones:Set, fromMb, toMb}
+  function proj(name) {
+    if (!projects.has(name)) projects.set(name, { phones: new Set(), fromMb: "", toMb: "" });
+    return projects.get(name);
+  }
+  function renderProjects() {
+    const tb = $("projects");
+    if (!projects.size) return;
+    tb.innerHTML = "";
+    [...projects.keys()].sort().forEach((name) => {
+      const p = projects.get(name);
+      const tr = document.createElement("tr");
+      const cells = [name, "", p.fromMb || "—", p.toMb || "—"];
+      cells.forEach((c, i) => {
+        const td = document.createElement("td");
+        if (i === 1) {
+          const pill = document.createElement("span");
+          pill.className = "pill" + (p.phones.size ? " ok" : "");
+          pill.textContent = p.phones.size ? "in place" : "none";
+          td.appendChild(pill);
+        } else { td.textContent = c; td.className = i ? "mono" : ""; }
+        tr.appendChild(td);
+      });
+      tb.appendChild(tr);
+    });
+  }
+  const stamp = (cmd) => `${cmd}  (${new Date().toLocaleTimeString()})`;
+
+  // ---------------------------------------------------------------- Ably
+  let ably = null, phoneCh = null;
+  const presence = new Map(); // clientId -> project
+
+  async function connectAbly(key) {
+    if (ably) { try { ably.close(); } catch (_) {} }
+    presence.clear();
+    projects.forEach((p) => p.phones.clear());
+    light("ably", "warn", "Connecting…");
+    ably = new Ably.Realtime({ key, clientId: "gateway", echoMessages: false });
+    ably.connection.on((c) => {
+      const map = { connected: ["ok", "Connected"], connecting: ["warn", "Connecting…"], disconnected: ["warn", "Reconnecting…"],
+                    suspended: ["bad", "Offline — retrying"], failed: ["bad", "Refused: " + (c.reason ? c.reason.message : "")], closed: ["", "Closed"] };
+      const [k, t] = map[c.current] || ["", c.current];
+      light("ably", k, t);
+      if (c.current === "failed") log("err", "Ably refused the key: " + (c.reason ? c.reason.message : ""));
+      if (c.current === "connected") log("sys", "Ably connected");
+    });
+    phoneCh = ably.channels.get("phone");
+    await phoneCh.subscribe("cmd", (msg) => {
+      const d = msg.data || {};
+      const line = `${d.project}:${d.cmd}`;
+      if (!LINE_RE.test(line)) { log("err", "ignored phone message: " + JSON.stringify(d).slice(0, 80)); return; }
+      sendToMicrobit(line);
+    });
+    await phoneCh.presence.subscribe((m) => {
+      const project = m.data && m.data.project;
+      if (m.action === "leave" || m.action === "absent") presence.delete(m.clientId);
+      else if (typeof project === "string" && /^[a-z0-9-]{1,10}$/.test(project)) presence.set(m.clientId, project);
+      updatePlaced();
+    });
+  }
+
+  function updatePlaced() {
+    const now = new Map();
+    presence.forEach((p, id) => { if (!now.has(p)) now.set(p, new Set()); now.get(p).add(id); });
+    const names = new Set([...projects.keys(), ...now.keys()]);
+    names.forEach((name) => {
+      const p = proj(name);
+      const was = p.phones.size > 0;
+      p.phones = now.get(name) || new Set();
+      const is = p.phones.size > 0;
+      if (is && !was) sendToMicrobit(`${name}:PLACED`);
+      if (!is && was) sendToMicrobit(`${name}:LEFT`);
+    });
+    renderProjects();
+  }
+
+  $("saveKey").onclick = () => {
+    const key = $("key").value.trim();
+    if (!/^[^.:\s]+\.[^.:\s]+:\S+$/.test(key)) { alert("That doesn't look like an Ably key (xxxx.yyyy:zzzz)."); return; }
+    try { localStorage.setItem(KEY_STORE, key); } catch (_) {}
+    connectAbly(key);
+  };
+  $("forgetKey").onclick = () => {
+    try { localStorage.removeItem(KEY_STORE); } catch (_) {}
+    $("key").value = "";
+    if (ably) ably.close();
+    light("ably", "", "Not connected");
+    log("sys", "Key removed from this laptop");
+  };
+
+  // ---------------------------------------------------------------- micro:bit messages
+  const recent = new Map(); // dedupe: the project micro:bits send every message twice
+  function fromMicrobit(raw) {
+    const line = raw.trim();
+    if (!line) return;
+    const m = LINE_RE.exec(line);
+    if (!m) { log("sys", "ignored: " + line.slice(0, 60)); return; }
+    const [, name, cmd] = m;
+    if (name === "gateway") {
+      if (cmd === "READY") { light("usb", "ok", "Connected — gateway ready"); resendPlaced(); }
+      return;
+    }
+    const nowMs = Date.now();
+    if (recent.get(line) > nowMs - 400) return;
+    recent.set(line, nowMs);
+    log("in", line);
+    proj(name).fromMb = stamp(cmd);
+    renderProjects();
+    if (!ably || ably.connection.state !== "connected") { log("err", "not sent to phones — Ably isn't connected"); return; }
+    ably.channels.get("exhibit:" + name).publish(cmd, { at: nowMs }).catch((e) => log("err", "publish failed: " + e.message));
+  }
+
+  function resendPlaced() {
+    projects.forEach((p, name) => { if (p.phones.size) sendToMicrobit(`${name}:PLACED`); });
+  }
+
+  // ---------------------------------------------------------------- Web Serial
+  let port = null, writer = null, reader = null, keepReading = false;
+  const encoder = new TextEncoder();
+
+  async function sendToMicrobit(line) {
+    const m = LINE_RE.exec(line);
+    if (m && m[1] !== "gateway") { proj(m[1]).toMb = stamp(m[2]); renderProjects(); }
+    if (!writer) { if (m && m[1] !== "gateway") log("err", `not sent (micro:bit not connected): ${line}`); return; }
+    try {
+      await writer.write(encoder.encode(line + "\n"));
+      if (m && m[1] !== "gateway") log("out", line);
+    } catch (e) { log("err", "USB write failed: " + e.message); }
+  }
+
+  async function openPort(p) {
+    if (port) return;
+    try {
+      await p.open({ baudRate: 115200 });
+    } catch (e) {
+      light("usb", "bad", "Could not open: " + e.message);
+      log("err", "USB open failed — is another tab or MakeCode using the micro:bit? " + e.message);
+      return;
+    }
+    port = p;
+    writer = port.writable.getWriter();
+    light("usb", "warn", "Connected — waiting for gateway…");
+    $("connectUsb").disabled = true; $("disconnectUsb").disabled = false;
+    log("sys", "micro:bit connected over USB");
+    readLoop();
+    setTimeout(() => sendToMicrobit("gateway:PING"), 300);
+    setTimeout(() => { if ($("usbStatus").textContent.includes("waiting")) {
+      light("usb", "warn", "Connected, but no reply — is the gateway program on this micro:bit?"); } }, 3000);
+  }
+
+  async function readLoop() {
+    keepReading = true;
+    const decoder = new TextDecoder();
+    let buf = "";
+    while (port && port.readable && keepReading) {
+      reader = port.readable.getReader();
+      try {
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          let i;
+          while ((i = buf.indexOf("\n")) >= 0) { fromMicrobit(buf.slice(0, i)); buf = buf.slice(i + 1); }
+          if (buf.length > 1000) buf = "";
+        }
+      } catch (e) {
+        if (keepReading) log("err", "USB read stopped: " + e.message);
+        break;
+      } finally {
+        try { reader.releaseLock(); } catch (_) {}
+      }
+    }
+    await closePort();
+  }
+
+  async function closePort() {
+    keepReading = false;
+    const p = port;
+    port = null;
+    try { reader && await reader.cancel(); } catch (_) {}
+    try { writer && writer.releaseLock(); } catch (_) {}
+    writer = null; reader = null;
+    try { p && await p.close(); } catch (_) {}
+    light("usb", "", "Not connected");
+    $("connectUsb").disabled = false; $("disconnectUsb").disabled = true;
+  }
+
+  $("connectUsb").onclick = async () => {
+    try {
+      const p = await navigator.serial.requestPort({ filters: [{ usbVendorId: MICROBIT_VENDOR }] });
+      await openPort(p);
+    } catch (e) { if (e.name !== "NotFoundError") log("err", e.message); }
+  };
+  $("disconnectUsb").onclick = () => { log("sys", "micro:bit disconnected"); closePort(); };
+
+  if ("serial" in navigator) {
+    navigator.serial.addEventListener("connect", (e) => { log("sys", "micro:bit plugged in"); openPort(e.target); });
+    navigator.serial.addEventListener("disconnect", (e) => { if (e.target === port) { log("err", "micro:bit unplugged"); closePort(); } });
+    navigator.serial.getPorts().then((ports) => { if (ports[0]) openPort(ports[0]); });
+  } else {
+    $("connectUsb").disabled = true;
+    $("usbHint").textContent = "This browser can't talk to USB devices. Open this page in Chrome or Edge on a computer.";
+    light("usb", "bad", "Not supported in this browser");
+  }
+
+  // ---------------------------------------------------------------- test tools
+  $("fakeInBtn").onclick = () => fromMicrobit($("fakeIn").value);
+  $("fakeOutBtn").onclick = () => {
+    const v = $("fakeOut").value.trim();
+    if (!LINE_RE.test(v)) { alert("Format: project:COMMAND  (e.g. leaves:PLACED)"); return; }
+    sendToMicrobit(v);
+  };
+
+  // ---------------------------------------------------------------- keep laptop awake + start
+  async function wake() { try { await navigator.wakeLock.request("screen"); } catch (_) {} }
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") wake(); });
+  wake();
+
+  let saved = null;
+  try { saved = localStorage.getItem(KEY_STORE); } catch (_) {}
+  if (saved) { $("key").value = saved; connectAbly(saved); }
+  log("sys", "Gateway page ready");
+})();
+</script>
+</body>
+</html>

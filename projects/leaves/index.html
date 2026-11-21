@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#2b1d12">
+<title>Autumn Leaves</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #2b1d12; overflow: hidden; overscroll-behavior: none; }
+  canvas { display: block; width: 100vw; height: 100vh; height: 100dvh; touch-action: none; }
+</style>
+</head>
+<body>
+<canvas id="scene"></canvas>
+
+<!-- Shared helper: handles "place your phone", the station claim and the connection. -->
+<script src="../../lib/exhibit.js"></script>
+<script>
+/*
+  Autumn Leaves — seen from above, as if the phone lies on the ground.
+  Messages from the micro:bit:
+    BLOW  the fan started: a gust sweeps across and blows some leaves away
+    DONE  the fan stopped: the wind dies down, then new leaves drift in
+
+  Options in the address:  ?from=left|right|top|bottom  (side the fan blows from, default left)
+*/
+(() => {
+  const params = new URLSearchParams(location.search);
+  const FROM = ["left", "right", "top", "bottom"].includes(params.get("from")) ? params.get("from") : "left";
+  const WIND = { left: [1, 0], right: [-1, 0], top: [0, 1], bottom: [0, -1] }[FROM];
+  const BLOW_MAX = 6.5;        // seconds; wind stops by itself if DONE never arrives
+  const REFILL_DELAY = 1.6;    // seconds after the wind dies before new leaves fall
+
+  const canvas = document.getElementById("scene");
+  const ctx = canvas.getContext("2d");
+  let W = 0, H = 0, DPR = 1, ground = null;
+
+  // ------------------------------------------------------------ leaf shapes
+  function maplePath() {
+    const p = new Path2D(), n = 120;
+    for (let i = 0; i <= n; i++) {
+      const t = (i / n) * Math.PI * 2;
+      let r = 0.55 + 0.45 * Math.pow(Math.abs(Math.cos((5 * (t + Math.PI / 2)) / 2)), 2.2);
+      const d = Math.atan2(Math.sin(t - Math.PI / 2), Math.cos(t - Math.PI / 2)); // distance from "down"
+      r *= 1 - 0.55 * Math.exp(-(d * d) / 0.06);
+      const x = Math.cos(t) * r, y = Math.sin(t) * r;
+      i ? p.lineTo(x, y) : p.moveTo(x, y);
+    }
+    p.closePath();
+    return p;
+  }
+  function ovalPath() {
+    const p = new Path2D();
+    p.moveTo(0, -1);
+    p.bezierCurveTo(0.62, -0.55, 0.55, 0.55, 0, 0.92);
+    p.bezierCurveTo(-0.55, 0.55, -0.62, -0.55, 0, -1);
+    return p;
+  }
+  function oakPath() {
+    const p = new Path2D(), n = 90;
+    for (let i = 0; i <= n; i++) {
+      const s = i / n, y = -1 + 2 * s;
+      const w = Math.sin(Math.PI * s) * (0.42 + 0.14 * Math.sin(s * Math.PI * 9));
+      i ? p.lineTo(w, y) : p.moveTo(w, y);
+    }
+    for (let i = n; i >= 0; i--) {
+      const s = i / n, y = -1 + 2 * s;
+      const w = Math.sin(Math.PI * s) * (0.42 + 0.14 * Math.sin(s * Math.PI * 9));
+      p.lineTo(-w, y);
+    }
+    p.closePath();
+    return p;
+  }
+  const SHAPES = [
+    { path: maplePath(), veins: [[0, 0.5, 0, -0.95], [0, 0.1, 0.8, -0.35], [0, 0.1, -0.8, -0.35], [0, 0.3, 0.6, 0.45], [0, 0.3, -0.6, 0.45]], stem: 0.5 },
+    { path: ovalPath(), veins: [[0, 0.92, 0, -0.9], [0, 0.2, 0.35, -0.2], [0, 0.2, -0.35, -0.2], [0, 0.5, 0.3, 0.2], [0, 0.5, -0.3, 0.2]], stem: 0.92 },
+    { path: oakPath(), veins: [[0, 1, 0, -0.95], [0, -0.3, 0.35, -0.5], [0, -0.3, -0.35, -0.5], [0, 0.3, 0.35, 0.1], [0, 0.3, -0.35, 0.1]], stem: 1 },
+  ];
+  const COLORS = ["#c0392b", "#d35400", "#e67e22", "#f39c12", "#b9770e", "#a04000", "#d4a017", "#9c2a1b", "#e8a33d", "#7f8c2e"];
+
+  // ------------------------------------------------------------ state
+  let leaves = [], streaks = [];
+  let target = 40;
+  let phase = "idle";          // idle | calm | wind | settle
+  let windT = 0, windEnd = 0, settleT = 0, spawnTimer = 0;
+  let last = performance.now();
+
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const pick = (arr) => arr[(Math.random() * arr.length) | 0];
+
+  function makeLeaf() {
+    const m = Math.min(W, H);
+    const pad = m * 0.06;
+    return {
+      x: rand(pad, W - pad), y: rand(pad, H - pad),
+      size: m * rand(0.055, 0.09),
+      shape: pick(SHAPES), color: pick(COLORS),
+      rot: rand(0, Math.PI * 2), vrot: rand(-2, 2),
+      flip: rand(0, Math.PI * 2), vflip: rand(2, 5),
+      z: rand(1.0, 1.4), vx: 0, vy: 0,
+      state: "drop", age: 0, sway: rand(0, 10),
+      blow: false, blowDelay: 0, grip: 0, wobble: rand(0, 10),
+    };
+  }
+
+  // position along the wind direction: 0 = side nearest the fan, 1 = far side
+  function along(l) {
+    if (FROM === "left") return l.x / W;
+    if (FROM === "right") return 1 - l.x / W;
+    if (FROM === "top") return l.y / H;
+    return 1 - l.y / H;
+  }
+
+  // ------------------------------------------------------------ events
+  function startWind() {
+    if (phase === "idle" || phase === "wind") return;
+    phase = "wind"; windT = 0; windEnd = BLOW_MAX;
+    for (const l of leaves) {
+      if (l.state !== "rest" && l.state !== "drop") continue;
+      const u = along(l);
+      l.blow = Math.random() < 0.3 + 0.4 * (1 - u);       // nearer the fan → more likely to go
+      l.blowDelay = u * 0.9 + rand(0.05, 3.0);            // the gust front crosses, then leaves let go one by one
+    }
+  }
+  function stopWind() {
+    if (phase !== "wind") return;
+    windEnd = Math.min(windEnd, windT + 0.6);              // fade out over 0.6 s
+  }
+
+  // ------------------------------------------------------------ simulation
+  function windStrength() {
+    if (phase !== "wind") return 0;
+    const ramp = Math.min(1, windT / 0.5) * Math.min(1, Math.max(0, (windEnd - windT) / 0.6));
+    const gust = 0.75 + 0.15 * Math.sin(windT * 5.3) + 0.1 * Math.sin(windT * 13.1 + 1);
+    return ramp * gust;
+  }
+
+  function step(dt) {
+    const m = Math.min(W, H);
+    const s = windStrength();
+
+    if (phase === "wind") {
+      windT += dt;
+      if (windT >= windEnd) { phase = "settle"; settleT = 0; }
+    } else if (phase === "settle") {
+      settleT += dt;
+      if (settleT > REFILL_DELAY) phase = "calm";
+    }
+
+    // new leaves drift in until the ground is full again
+    if (phase === "calm") {
+      spawnTimer -= dt;
+      const alive = leaves.filter((l) => l.state !== "gone").length;
+      if (alive < target && spawnTimer <= 0) { leaves.push(makeLeaf()); spawnTimer = rand(0.08, 0.22); }
+    }
+
+    for (const l of leaves) {
+      l.age += dt;
+      if (l.state === "drop") {
+        // falling towards the ground (z → 0), swaying and spinning
+        l.z = Math.max(0, l.z - dt * 0.75);
+        l.x += Math.sin(l.age * 2.2 + l.sway) * m * 0.12 * dt * l.z;
+        l.y += Math.cos(l.age * 1.7 + l.sway) * m * 0.05 * dt * l.z;
+        l.rot += l.vrot * dt * (0.3 + l.z);
+        l.flip += l.vflip * dt * l.z;
+        if (l.z === 0) { l.state = "rest"; l.flip = 0; }
+      }
+
+      if ((l.state === "rest" || l.state === "drop") && phase === "wind") {
+        const reached = windT > along(l) * 0.9;
+        if (reached && l.blow && windT > l.blowDelay && s > 0.3) {
+          l.state = "fly";
+          l.vx = 0; l.vy = 0;
+          l.vrot = rand(-9, 9);
+          l.vflip = rand(6, 14);
+        } else if (reached && l.state === "rest") {
+          // held down: tremble and creep a little downwind
+          l.wobble += dt * 18;
+          l.rot += Math.sin(l.wobble) * 0.03 * s;
+          l.x += WIND[0] * m * 0.012 * s * dt;
+          l.y += WIND[1] * m * 0.012 * s * dt;
+        }
+      }
+
+      if (l.state === "fly") {
+        const push = m * 3.2 * Math.max(s, 0.35);
+        const turb = Math.sin(l.age * 6 + l.sway) * m * 1.6;
+        l.vx += (WIND[0] * push + -WIND[1] * turb) * dt;
+        l.vy += (WIND[1] * push + WIND[0] * turb) * dt;
+        l.vx *= 1 - 1.2 * dt; l.vy *= 1 - 1.2 * dt;
+        l.x += l.vx * dt; l.y += l.vy * dt;
+        l.z = Math.min(0.55, l.z + dt * 0.9) * (0.85 + 0.15 * Math.sin(l.age * 9));
+        l.rot += l.vrot * dt;
+        l.flip += l.vflip * dt;
+        const out = l.size * 2;
+        if (l.x < -out || l.x > W + out || l.y < -out || l.y > H + out) l.state = "gone";
+      }
+    }
+    leaves = leaves.filter((l) => l.state !== "gone");
+
+    // wind streaks
+    if (s > 0.2 && streaks.length < 26 && Math.random() < s * 0.9) {
+      const across = Math.random();
+      streaks.push({
+        x: WIND[0] ? (WIND[0] > 0 ? -60 : W + 60) : across * W,
+        y: WIND[1] ? (WIND[1] > 0 ? -60 : H + 60) : across * H,
+        len: m * rand(0.15, 0.4), speed: m * rand(1.6, 2.6), life: 0, wav: rand(0, 6),
+      });
+    }
+    for (const k of streaks) {
+      k.x += WIND[0] * k.speed * dt; k.y += WIND[1] * k.speed * dt; k.life += dt;
+    }
+    streaks = streaks.filter((k) => k.x > -200 && k.x < W + 200 && k.y > -200 && k.y < H + 200);
+  }
+
+  // ------------------------------------------------------------ drawing
+  function makeGround() {
+    const g = document.createElement("canvas");
+    g.width = W * DPR; g.height = H * DPR;
+    const c = g.getContext("2d");
+    c.scale(DPR, DPR);
+    const grad = c.createRadialGradient(W * 0.5, H * 0.45, 0, W * 0.5, H * 0.5, Math.hypot(W, H) * 0.6);
+    grad.addColorStop(0, "#5a4126"); grad.addColorStop(0.6, "#3d2b19"); grad.addColorStop(1, "#22170d");
+    c.fillStyle = grad; c.fillRect(0, 0, W, H);
+    // soil specks and pebbles
+    for (let i = 0; i < (W * H) / 260; i++) {
+      c.fillStyle = `rgba(${pick(["255,230,190", "20,12,6", "120,95,60"])},${rand(0.04, 0.14)})`;
+      c.beginPath(); c.arc(rand(0, W), rand(0, H), rand(0.5, 2.2), 0, 7); c.fill();
+    }
+    // a few twigs
+    c.lineCap = "round";
+    for (let i = 0; i < 9; i++) {
+      const x = rand(0, W), y = rand(0, H), a = rand(0, 7), len = rand(20, 70);
+      c.strokeStyle = `rgba(30,18,8,${rand(0.35, 0.6)})`; c.lineWidth = rand(1.5, 3.5);
+      c.beginPath(); c.moveTo(x, y);
+      c.quadraticCurveTo(x + Math.cos(a) * len * 0.5 + rand(-8, 8), y + Math.sin(a) * len * 0.5 + rand(-8, 8),
+                         x + Math.cos(a) * len, y + Math.sin(a) * len);
+      c.stroke();
+    }
+    return g;
+  }
+
+  function drawLeaf(l, shadowPass) {
+    const scale = l.size * (1 + l.z * 0.7);
+    const sx = Math.cos(l.flip);
+    ctx.save();
+    if (shadowPass) {
+      const off = 3 + l.z * Math.min(W, H) * 0.05;
+      ctx.translate(l.x + off, l.y + off * 1.2);
+      ctx.rotate(l.rot);
+      ctx.scale(scale * Math.max(Math.abs(sx), 0.15), scale);
+      ctx.fillStyle = `rgba(10,5,0,${0.38 - l.z * 0.15})`;
+      ctx.fill(l.shape.path);
+      ctx.restore();
+      return;
+    }
+    ctx.translate(l.x, l.y);
+    ctx.rotate(l.rot);
+    ctx.scale(scale * (Math.abs(sx) < 0.15 ? 0.15 * Math.sign(sx || 1) : sx), scale);
+    ctx.fillStyle = l.color;
+    ctx.fill(l.shape.path);
+    // underside is a bit paler
+    if (sx < 0) { ctx.fillStyle = "rgba(255,240,200,.18)"; ctx.fill(l.shape.path); }
+    ctx.strokeStyle = "rgba(60,25,5,.45)";
+    ctx.lineWidth = 0.045;
+    ctx.beginPath();
+    for (const [x1, y1, x2, y2] of l.shape.veins) { ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); }
+    ctx.moveTo(0, l.shape.stem); ctx.lineTo(0.05, l.shape.stem + 0.35);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function draw() {
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    if (ground) ctx.drawImage(ground, 0, 0, W, H); else { ctx.fillStyle = "#2b1d12"; ctx.fillRect(0, 0, W, H); }
+
+    const order = leaves.slice().sort((a, b) => a.z - b.z);
+    for (const l of order) drawLeaf(l, true);
+    for (const l of order) drawLeaf(l, false);
+
+    const s = windStrength();
+    ctx.lineCap = "round";
+    for (const k of streaks) {
+      const a = Math.min(1, k.life * 3) * 0.22 * Math.max(s, 0.1);
+      ctx.strokeStyle = `rgba(255,245,225,${a})`;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      const nx = -WIND[1], ny = WIND[0];
+      for (let i = 0; i <= 12; i++) {
+        const t = i / 12, wv = Math.sin(t * 6 + k.wav + k.life * 4) * 6;
+        const x = k.x - WIND[0] * k.len * t + nx * wv, y = k.y - WIND[1] * k.len * t + ny * wv;
+        i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+      }
+      ctx.stroke();
+    }
+  }
+
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth; H = window.innerHeight;
+    canvas.width = W * DPR; canvas.height = H * DPR;
+    target = Math.round(Math.max(24, Math.min(60, (W * H) / 9000)));
+    ground = makeGround();
+    for (const l of leaves) { l.x = Math.min(l.x, W - 10); l.y = Math.min(l.y, H - 10); }
+  }
+
+  function frame(t) {
+    const dt = Math.min(0.05, (t - last) / 1000);
+    last = t;
+    step(dt);
+    draw();
+    requestAnimationFrame(frame);
+  }
+
+  window.addEventListener("resize", resize);
+  resize();
+  requestAnimationFrame(frame);
+
+  // for testing from the console: leavesScene.blow(), leavesScene.done()
+  window.leavesScene = { blow: startWind, done: stopWind, get leaves() { return leaves; }, get phase() { return phase; } };
+
+  // ------------------------------------------------------------ connect to the exhibit
+  Exhibit.start({
+    project: "leaves",
+    title: "Autumn Leaves",
+    instructions: "Place your phone flat in the leaf tray, screen up. Then tap the button.",
+    demoEvents: ["BLOW", "DONE"],
+    onPlaced() { leaves = []; phase = "calm"; spawnTimer = 0.3; },
+    onEvent(cmd) {
+      if (cmd === "BLOW") startWind();
+      else if (cmd === "DONE") stopWind();
+    },
+    onRemoved() { phase = "idle"; leaves = []; streaks = []; },
+  });
+})();
+</script>
+</body>
+</html>

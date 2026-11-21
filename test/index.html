@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Network Check</title>
+<style>
+  :root {
+    --bg: #f6f4ef; --card: #ffffff; --ink: #1d1c1a; --muted: #6d6a63; --line: #e4e0d7;
+    --ok: #1f8a4c; --bad: #c0392b; --warn: #b7791f; --info: #3b6ea8; --accent: #c2410c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #161514; --card: #201f1d; --ink: #f1eee8; --muted: #a29e95; --line: #34322e;
+            --ok: #4cc27f; --bad: #ef6b5b; --warn: #e3a64a; --info: #7aa7dc; --accent: #f08a4b; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 640px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 1.5rem; margin: 0 0 4px; }
+  h2 { font-size: 1rem; margin: 28px 0 10px; color: var(--muted); font-weight: 600;
+       text-transform: uppercase; letter-spacing: .04em; }
+  p.lead { margin: 0 0 18px; color: var(--muted); }
+  .verdict { border-radius: 14px; padding: 16px 18px; background: var(--card);
+             border: 2px solid var(--line); margin-bottom: 8px; }
+  .verdict strong { display: block; font-size: 1.15rem; margin-bottom: 2px; }
+  .verdict.ok { border-color: var(--ok); } .verdict.bad { border-color: var(--bad); }
+  .verdict.warn { border-color: var(--warn); }
+  ul.checks { list-style: none; margin: 0; padding: 0; background: var(--card);
+              border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
+  ul.checks li { display: grid; grid-template-columns: 28px 1fr auto; gap: 10px;
+                 padding: 12px 14px; border-top: 1px solid var(--line); align-items: start; }
+  ul.checks li:first-child { border-top: 0; }
+  .icon { width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center;
+          font-size: 14px; font-weight: 700; color: #fff; background: var(--muted); }
+  .ok .icon { background: var(--ok); } .bad .icon { background: var(--bad); }
+  .warn .icon { background: var(--warn); } .info .icon { background: var(--info); }
+  .run .icon { background: transparent; border: 3px solid var(--line); border-top-color: var(--accent);
+               animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .name { font-weight: 600; } .why { color: var(--muted); font-size: .88rem; }
+  .ms { color: var(--muted); font-size: .85rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  button { font: inherit; font-weight: 600; border: 0; border-radius: 10px; padding: 11px 16px;
+           background: var(--accent); color: #fff; cursor: pointer; }
+  button.secondary { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+  button:disabled { opacity: .5; cursor: default; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+  input { font: inherit; width: 100%; padding: 11px 12px; border-radius: 10px;
+          border: 1px solid var(--line); background: var(--card); color: var(--ink); }
+  details { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; }
+  summary { cursor: pointer; font-weight: 600; }
+  #qr { background: #fff; padding: 10px; border-radius: 10px; display: inline-block; margin-top: 10px; }
+  #qr:empty { display: none; }
+  .small { font-size: .85rem; color: var(--muted); word-break: break-all; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Exhibit network check</h1>
+  <p class="lead">Checks whether this network lets phones and the laptop reach the services the exhibit uses. Run it once on school Wi-Fi and once on mobile data.</p>
+
+  <div id="verdict" class="verdict"><strong>Running checks…</strong><span class="why">This takes about 10 seconds.</span></div>
+  <p class="small" id="netinfo"></p>
+
+  <h2>Connections</h2>
+  <ul class="checks" id="checks"></ul>
+  <div class="row">
+    <button id="rerun">Run again</button>
+    <button id="copy" class="secondary">Copy results</button>
+  </div>
+
+  <h2>Full message test (optional)</h2>
+  <details id="keybox">
+    <summary>Test with an Ably key</summary>
+    <p class="why">Once you have an Ably account, paste an API key here. The page sends a message to itself through Ably and reports which connection type got through. The key is used only on this page and is not saved.</p>
+    <input id="key" type="password" autocomplete="off" placeholder="xxxxxx.yyyyyy:zzzzzzzz">
+    <div class="row"><button id="keytest">Run message test</button></div>
+  </details>
+
+  <h2>Device</h2>
+  <ul class="checks" id="device"></ul>
+
+  <h2>Share this test</h2>
+  <p class="small" id="here"></p>
+  <div id="qr"></div>
+</main>
+
+<script>
+(() => {
+  const ABLY_LIB = "https://cdn.jsdelivr.net/npm/ably@2.4.0/build/ably.min.js";
+  const TIMEOUT = 8000;
+  const $ = (id) => document.getElementById(id);
+  const results = [];
+
+  // ---------- UI helpers ----------
+  function addRow(list, name, why) {
+    const li = document.createElement("li");
+    li.className = "run";
+    li.innerHTML = `<span class="icon"></span><span><span class="name"></span><br><span class="why"></span></span><span class="ms"></span>`;
+    li.querySelector(".name").textContent = name;
+    li.querySelector(".why").textContent = why;
+    $(list).appendChild(li);
+    return li;
+  }
+  function setRow(li, state, detail, ms) {
+    li.className = state;
+    li.querySelector(".icon").textContent = { ok: "✓", bad: "✕", warn: "!", info: "i" }[state] || "";
+    if (detail) li.querySelector(".why").textContent = detail;
+    li.querySelector(".ms").textContent = ms != null ? `${ms} ms` : "";
+  }
+  const now = () => performance.now();
+  const withTimeout = (p, ms = TIMEOUT) =>
+    Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error("timed out")), ms))]);
+
+  // ---------- individual probes ----------
+  // Reachability of any https site, CORS not required.
+  async function probeHttps(url) {
+    const t = now();
+    await withTimeout(fetch(url + (url.includes("?") ? "&" : "?") + "_=" + Date.now(),
+                            { mode: "no-cors", cache: "no-store" }));
+    return Math.round(now() - t);
+  }
+  // Ably REST time endpoint: real HTTPS request with a readable reply.
+  async function probeAblyHttp() {
+    const t = now();
+    const r = await withTimeout(fetch("https://rest.ably.io/time", { cache: "no-store" }));
+    const body = await r.json();
+    if (!Array.isArray(body)) throw new Error("unexpected reply");
+    return Math.round(now() - t);
+  }
+  // WebSocket: success if the handshake opens or the server replies at all.
+  function probeWs(url) {
+    return new Promise((resolve, reject) => {
+      const t = now();
+      let done = false, ws;
+      const finish = (ok, err) => {
+        if (done) return; done = true;
+        try { ws.close(); } catch (_) {}
+        ok ? resolve(Math.round(now() - t)) : reject(new Error(err));
+      };
+      try { ws = new WebSocket(url); } catch (e) { return reject(e); }
+      ws.onopen = () => finish(true);
+      ws.onmessage = () => finish(true);
+      ws.onerror = () => finish(false, "connection refused or blocked");
+      ws.onclose = (e) => finish(false, `closed before opening (code ${e.code})`);
+      setTimeout(() => finish(false, "timed out"), TIMEOUT);
+    });
+  }
+
+  const CHECKS = [
+    { id: "github", name: "GitHub Pages", why: "Where the project pages are hosted.",
+      run: () => probeHttps("https://pages.github.com/"), critical: true },
+    { id: "cdn", name: "Script library (jsDelivr)", why: "Where the pages load the Ably code from.",
+      run: () => probeHttps(ABLY_LIB), critical: true },
+    { id: "ablyHttp", name: "Ably — normal web requests (port 443)", why: "The fallback path. If this works, messages can get through.",
+      run: probeAblyHttp, critical: true },
+    { id: "ablyWs", name: "Ably — live connection (WebSocket, port 443)", why: "The fast path. Nice to have; Ably falls back automatically.",
+      run: () => probeWs("wss://realtime.ably.io/?key=networkcheck.invalid:invalid&format=json&v=3") },
+    { id: "mqtt", name: "For comparison: MQTT port 8884", why: "The kind of connection we expect school networks to block. Not used by the exhibit.",
+      run: () => probeWs("wss://broker.hivemq.com:8884/mqtt"), comparison: true },
+  ];
+
+  // ---------- run all ----------
+  async function runAll() {
+    $("rerun").disabled = true;
+    $("checks").innerHTML = "";
+    results.length = 0;
+    const v = $("verdict"); v.className = "verdict";
+    v.innerHTML = `<strong>Running checks…</strong><span class="why">This takes about 10 seconds.</span>`;
+
+    await Promise.all(CHECKS.map(async (c) => {
+      const li = addRow("checks", c.name, c.why);
+      try {
+        const ms = await c.run();
+        setRow(li, c.comparison ? "info" : "ok", c.comparison ? "Open on this network." : "Reachable.", ms);
+        results.push({ id: c.id, ok: true, ms });
+      } catch (e) {
+        setRow(li, c.comparison ? "info" : (c.critical ? "bad" : "warn"),
+               (c.comparison ? "Blocked on this network (as expected at school)." : "Blocked: ") + (c.comparison ? "" : e.message));
+        results.push({ id: c.id, ok: false, err: e.message });
+      }
+    }));
+
+    const ok = (id) => results.find((r) => r.id === id)?.ok;
+    if (ok("github") && ok("cdn") && ok("ablyHttp") && ok("ablyWs")) {
+      v.className = "verdict ok";
+      v.innerHTML = `<strong>✓ This network works for the exhibit</strong><span class="why">Pages, scripts and live messages all get through.</span>`;
+    } else if (ok("github") && ok("cdn") && ok("ablyHttp")) {
+      v.className = "verdict warn";
+      v.innerHTML = `<strong>! Works, using the fallback</strong><span class="why">Live connections are blocked, but Ably switches to normal web requests. Expect a little more delay. Confirm with the message test below.</span>`;
+    } else {
+      const blocked = CHECKS.filter((c) => c.critical && !ok(c.id)).map((c) => c.name).join(", ");
+      v.className = "verdict bad";
+      v.innerHTML = `<strong>✕ Something the exhibit needs is blocked</strong><span class="why"></span>`;
+      v.querySelector(".why").textContent = `Blocked: ${blocked}. Try mobile data or a phone hotspot to compare.`;
+    }
+    $("rerun").disabled = false;
+  }
+
+  // ---------- optional Ably round trip ----------
+  let ablyLoading;
+  function loadAbly() {
+    if (window.Ably) return Promise.resolve();
+    ablyLoading ||= new Promise((res, rej) => {
+      const s = document.createElement("script");
+      s.src = ABLY_LIB; s.onload = res; s.onerror = () => rej(new Error("could not load the Ably library"));
+      document.head.appendChild(s);
+    });
+    return ablyLoading;
+  }
+  async function roundTrip(key, transports, label) {
+    const li = addRow("checks", `Message test — ${label}`, "Connecting…");
+    let client;
+    try {
+      await loadAbly();
+      client = new Ably.Realtime({ key, transports, clientId: "network-check", disconnectedRetryTimeout: 2000 });
+      await withTimeout(new Promise((res, rej) => {
+        client.connection.once("connected", res);
+        client.connection.once("failed", (s) => rej(new Error(s.reason?.message || "connection failed")));
+      }), 12000);
+      const ch = client.channels.get("network-check:" + Math.random().toString(36).slice(2, 8));
+      const t = now();
+      const got = new Promise((res) => ch.subscribe("ping", res));
+      await ch.attach();
+      await ch.publish("ping", { sent: Date.now() });
+      await withTimeout(got, 8000);
+      const ms = Math.round(now() - t);
+      setRow(li, "ok", "Message sent and received back.", ms);
+      results.push({ id: "rt-" + label, ok: true, ms });
+    } catch (e) {
+      setRow(li, "bad", "Failed: " + e.message);
+      results.push({ id: "rt-" + label, ok: false, err: e.message });
+    } finally {
+      try { client && client.close(); } catch (_) {}
+    }
+  }
+  $("keytest").onclick = async () => {
+    const key = $("key").value.trim();
+    if (!/^[^.:\s]+\.[^.:\s]+:\S+$/.test(key)) { alert("That doesn't look like an Ably API key (format: xxxx.yyyy:zzzz)."); return; }
+    $("keytest").disabled = true;
+    await roundTrip(key, ["web_socket"], "live connection");
+    await roundTrip(key, ["xhr_polling"], "fallback");
+    $("keytest").disabled = false;
+  };
+
+  // ---------- device info ----------
+  function deviceInfo() {
+    const ua = navigator.userAgent;
+    const ios = /iPhone|iPad|iPod/.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+    const mobile = ios || /Android|Mobile/.test(ua);
+    const rows = [
+      ["Screen stay-awake (Wake Lock)", "Keeps the phone screen on while it sits in place.", "wakeLock" in navigator ? "ok" : "warn",
+        "wakeLock" in navigator ? "Supported." : "Not supported here; screen may dim after a while."],
+      ["Secure page (https)", "Required for stay-awake and for the gateway page.", isSecureContext ? "ok" : "warn",
+        isSecureContext ? "Yes." : "No — open this page from GitHub Pages, not a local file."],
+    ];
+    if (!mobile) rows.push(["USB to micro:bit (Web Serial)", "Needed only on the gateway laptop.",
+      "serial" in navigator ? "ok" : "warn", "serial" in navigator ? "Supported — this browser can be the gateway." : "Not supported — use Chrome or Edge on the laptop."]);
+    rows.forEach(([n, w, s, d]) => setRow(addRow("device", n, w), s, d));
+    const c = navigator.connection;
+    $("netinfo").textContent = (ios ? "iPhone/iPad" : mobile ? "Phone" : "Computer") +
+      (c && c.type ? ` · connection: ${c.type}` : "") + (c && c.effectiveType ? ` · ${c.effectiveType}` : "");
+  }
+
+  // ---------- copy + QR ----------
+  $("copy").onclick = async () => {
+    const lines = [`Network check — ${new Date().toLocaleString()}`, $("netinfo").textContent, navigator.userAgent,
+      ...results.map((r) => `${r.ok ? "OK " : "BLOCKED"}  ${r.id}${r.ms != null ? `  ${r.ms}ms` : ""}${r.err ? `  (${r.err})` : ""}`)];
+    try { await navigator.clipboard.writeText(lines.join("\n")); $("copy").textContent = "Copied ✓"; }
+    catch (_) { prompt("Copy these results:", lines.join(" | ")); }
+    setTimeout(() => ($("copy").textContent = "Copy results"), 2000);
+  };
+  $("here").textContent = location.href.startsWith("http") ? location.href : "Open this page from its web address to share it by QR code.";
+  if (location.href.startsWith("http")) {
+    const s = document.createElement("script");
+    s.src = "https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js";
+    s.onload = () => new QRCode($("qr"), { text: location.href, width: 180, height: 180 });
+    document.head.appendChild(s);
+  }
+
+  $("rerun").onclick = runAll;
+  deviceInfo();
+  runAll();
+})();
+</script>
+</body>
+</html>
