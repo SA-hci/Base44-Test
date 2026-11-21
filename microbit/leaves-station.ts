@@ -1,5 +1,5 @@
-// LEAVES station micro:bit  (DFRobot micro:bit shield + Gravity modules)
-// Button: Gravity digital push button on P1  (sends 1 while pressed)
+// LEAVES station micro:bit  (DFRobot micro:bit shield + Gravity fan module)
+// Button: the micro:bit's own button A
 // Fan:    Gravity fan module on P8
 //
 // How to use: makecode.microbit.org → New Project → switch to "JavaScript" at the top,
@@ -12,8 +12,6 @@
 
 let PROJECT = "leaves"
 let BLOW_TIME = 5000
-// Gravity button = 1 when pressed. (A plain button wired to GND would be 0.)
-let PRESSED = 1
 // Fan on = 1. If the fan spins when it should be off and stops when it should spin, change to 0.
 let FAN_ON = 1
 let FAN_OFF = 1 - FAN_ON
@@ -21,7 +19,6 @@ let phoneHere = false
 
 radio.setGroup(77)
 radio.setTransmitPower(7)
-pins.setPull(DigitalPin.P1, PinPullMode.PullNone)
 pins.digitalWritePin(DigitalPin.P8, FAN_OFF)
 basic.showIcon(IconNames.Asleep)
 
@@ -51,7 +48,7 @@ radio.onReceivedString(function (receivedString) {
 })
 
 basic.forever(function () {
-    if (pins.digitalReadPin(DigitalPin.P1) == PRESSED) {
+    if (input.buttonIsPressed(Button.A)) {
         send("BLOW")
         pins.digitalWritePin(DigitalPin.P8, FAN_ON)
         basic.showLeds(`
@@ -65,8 +62,8 @@ basic.forever(function () {
         pins.digitalWritePin(DigitalPin.P8, FAN_OFF)
         send("DONE")
         showWaiting()
-        // wait until the button is let go, so holding it doesn't restart the fan
-        while (pins.digitalReadPin(DigitalPin.P1) == PRESSED) {
+        // wait until button A is let go, so holding it doesn't restart the fan
+        while (input.buttonIsPressed(Button.A)) {
             basic.pause(20)
         }
     }
