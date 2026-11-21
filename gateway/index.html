@@ -104,7 +104,8 @@
   </section>
 </main>
 
-<script src="https://cdn.jsdelivr.net/npm/ably@2.4.0/build/ably.min.js"></script>
+<!-- Ably v3 device build (accounts on MAU pricing require v3+). Exposes window.AblyPubSub. -->
+<script src="https://cdn.jsdelivr.net/npm/@ably/pubsub-device@3.0.0/dist/cdn/ably.min.js"></script>
 <script>
 (() => {
   "use strict";
@@ -164,7 +165,7 @@
     presence.clear();
     projects.forEach((p) => p.phones.clear());
     light("ably", "warn", "Connecting…");
-    ably = new Ably.Realtime({ key, clientId: "gateway", echoMessages: false });
+    ably = AblyPubSub.createClient({ key, clientId: "gateway", echoMessages: false });
     ably.connection.on((c) => {
       const map = { connected: ["ok", "Connected"], connecting: ["warn", "Connecting…"], disconnected: ["warn", "Reconnecting…"],
                     suspended: ["bad", "Offline — retrying"], failed: ["bad", "Refused: " + (c.reason ? c.reason.message : "")], closed: ["", "Closed"] };
