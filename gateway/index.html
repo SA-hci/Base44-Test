@@ -227,7 +227,12 @@
     if (!m) { log("sys", "ignored: " + line.slice(0, 60)); return; }
     const [, name, cmd] = m;
     if (name === "gateway") {
-      if (cmd === "READY") { light("usb", "ok", "Connected — gateway ready"); resendPlaced(); }
+      if ((cmd === "READY" || cmd === "ALIVE") && !gatewayReady) {
+        gatewayReady = true;
+        light("usb", "ok", "Connected — gateway ready");
+        log("sys", "gateway micro:bit answered");
+        resendPlaced();
+      }
       return;
     }
     const nowMs = Date.now();
@@ -245,7 +250,7 @@
   }
 
   // ---------------------------------------------------------------- Web Serial
-  let port = null, writer = null, reader = null, keepReading = false;
+  let port = null, writer = null, reader = null, keepReading = false, gatewayReady = false, bytesIn = 0;
   const encoder = new TextEncoder();
 
   async function sendToMicrobit(line) {
@@ -268,14 +273,22 @@
       return;
     }
     port = p;
+    gatewayReady = false; bytesIn = 0;
+    // some USB serial devices only send data once the computer raises these "ready" signals
+    try { await port.setSignals({ dataTerminalReady: true, requestToSend: true }); } catch (_) {}
     writer = port.writable.getWriter();
     light("usb", "warn", "Connected — waiting for gateway…");
     $("connectUsb").disabled = true; $("disconnectUsb").disabled = false;
     log("sys", "micro:bit connected over USB");
     readLoop();
-    setTimeout(() => sendToMicrobit("gateway:PING"), 300);
-    setTimeout(() => { if ($("usbStatus").textContent.includes("waiting")) {
-      light("usb", "warn", "Connected, but no reply — is the gateway program on this micro:bit?"); } }, 3000);
+    [300, 1500, 3500].forEach((ms) => setTimeout(() => { if (port && !gatewayReady) sendToMicrobit("gateway:PING"); }, ms));
+    setTimeout(() => {
+      if (!port || gatewayReady) return;
+      const why = bytesIn ? `received ${bytesIn} bytes but no gateway message — see log` : "nothing received from the micro:bit";
+      light("usb", "warn", "Connected, but no reply: " + why);
+      log("err", `No gateway reply after 6 s (${why}). Check: bottom-right LED blinks = laptop→micro:bit works; ` +
+                 "top-right LED blinking every 2 s = new gateway program is on it. Try unplugging and plugging the micro:bit back in.");
+    }, 6000);
   }
 
   async function readLoop() {
@@ -288,6 +301,7 @@
         while (true) {
           const { value, done } = await reader.read();
           if (done) break;
+          bytesIn += value.length;
           buf += decoder.decode(value, { stream: true });
           let i;
           while ((i = buf.indexOf("\n")) >= 0) { fromMicrobit(buf.slice(0, i)); buf = buf.slice(i + 1); }
@@ -305,6 +319,7 @@
 
   async function closePort() {
     keepReading = false;
+    gatewayReady = false;
     const p = port;
     port = null;
     try { reader && await reader.cancel(); } catch (_) {}
