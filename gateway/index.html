@@ -220,7 +220,7 @@
 
   // ---------------------------------------------------------------- micro:bit messages
   const recent = new Map(); // dedupe: the project micro:bits send every message twice
-  let garbleTimes = [], garbleWarned = 0;
+  let garbleTimes = [], garbleWarned = 0, lastAlive = 0;
   const name0 = (m) => m[1];
   function fromMicrobit(raw) {
     const line = raw.trim();
@@ -242,6 +242,15 @@
     }
     const [, name, cmd] = m;
     if (name === "gateway") {
+      // the heartbeat is sent every 2 s — a bigger gap means USB is holding messages back
+      if (cmd === "ALIVE") {
+        const t = Date.now();
+        if (lastAlive && t - lastAlive > 4500) {
+          log("err", `USB delay: nothing from the gateway micro:bit for ${((t - lastAlive) / 1000).toFixed(1)} s ` +
+                     "(messages were held up). Flash the newest gateway program; if it continues, replug the micro:bit.");
+        }
+        lastAlive = t;
+      }
       if ((cmd === "READY" || cmd === "ALIVE") && !gatewayReady) {
         gatewayReady = true;
         light("usb", "ok", "Connected — gateway ready");
@@ -288,7 +297,7 @@
       return;
     }
     port = p;
-    gatewayReady = false; bytesIn = 0;
+    gatewayReady = false; bytesIn = 0; lastAlive = 0;
     // some USB serial devices only send data once the computer raises these "ready" signals
     try { await port.setSignals({ dataTerminalReady: true, requestToSend: true }); } catch (_) {}
     writer = port.writable.getWriter();
