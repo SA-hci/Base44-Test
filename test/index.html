@@ -87,7 +87,7 @@
 
 <script>
 (() => {
-  const ABLY_LIB = "https://cdn.jsdelivr.net/npm/ably@2.4.0/build/ably.min.js";
+  const ABLY_LIB = "https://cdn.jsdelivr.net/npm/@ably/pubsub-device@3.0.0/dist/cdn/ably.min.js";
   const TIMEOUT = 8000;
   const $ = (id) => document.getElementById(id);
   const results = [];
@@ -200,7 +200,7 @@
   // ---------- optional Ably round trip ----------
   let ablyLoading;
   function loadAbly() {
-    if (window.Ably) return Promise.resolve();
+    if (window.AblyPubSub) return Promise.resolve();
     ablyLoading ||= new Promise((res, rej) => {
       const s = document.createElement("script");
       s.src = ABLY_LIB; s.onload = res; s.onerror = () => rej(new Error("could not load the Ably library"));
@@ -213,7 +213,7 @@
     let client;
     try {
       await loadAbly();
-      client = new Ably.Realtime({ key, transports, clientId: "network-check", disconnectedRetryTimeout: 2000 });
+      client = AblyPubSub.createClient({ key, transports, clientId: "network-check", disconnectedRetryTimeout: 2000 });
       await withTimeout(new Promise((res, rej) => {
         client.connection.once("connected", res);
         client.connection.once("failed", (s) => rej(new Error(s.reason?.message || "connection failed")));
