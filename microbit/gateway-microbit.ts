@@ -5,6 +5,11 @@
 // How to use: makecode.microbit.org → New Project → switch to "JavaScript" at the top,
 // delete everything, paste this file, then Download to the gateway micro:bit.
 // Every project micro:bit must use the same radio group (77).
+//
+// Screen:  ✓ = running
+//          bottom-left dot blinks  = a radio message went to the laptop
+//          bottom-right dot blinks = the laptop sent something (proves USB → micro:bit works)
+//          top-right dot blinks every 2 s = "I'm alive" sent to the laptop
 
 radio.setGroup(77)
 radio.setTransmitPower(7)
@@ -21,15 +26,20 @@ radio.onReceivedString(function (receivedString) {
 // laptop → radio
 serial.onDataReceived(serial.delimiters(Delimiters.NewLine), function () {
     let line = serial.readUntil(serial.delimiters(Delimiters.NewLine))
-    if (line == "gateway:PING") {
+    led.toggle(4, 4)
+    if (line.includes("gateway:PING")) {
         serial.writeLine("gateway:READY")
     } else if (line.length > 0) {
         // send twice, in case one copy is lost
         radio.sendString(line)
         basic.pause(20)
         radio.sendString(line)
-        led.toggle(4, 4)
     }
 })
 
-serial.writeLine("gateway:READY")
+// heartbeat, so the laptop knows the gateway is there even if it missed the first message
+basic.forever(function () {
+    serial.writeLine("gateway:ALIVE")
+    led.toggle(4, 0)
+    basic.pause(2000)
+})
