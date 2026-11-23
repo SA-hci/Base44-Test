@@ -30,86 +30,410 @@
   Autumn Leaves — seen from above, as if the phone lies on the ground.
   Messages from the micro:bit:
     BLOW  the fan started: a gust sweeps across and blows some leaves away
-    DONE  the fan stopped: the wind dies down, then new leaves drift in
+    DONE  the fan stopped: the wind dies down, airborne leaves fall back, then new leaves drift in
 
   Options in the address:  ?from=left|right|top|bottom  (side the fan blows from, default left)
+
+  How it looks real:
+    - every leaf type is painted once into an image (sprite): shape, colour fade, blotches, veins, paler back
+    - leaves tilt in 3D (we see them get narrow / show their back), with soft shadows that grow with height
+    - falling leaves swing like a pendulum; in wind they tremble, skitter along the ground, then lift and tumble
 */
 (() => {
   const params = new URLSearchParams(location.search);
   const FROM = ["left", "right", "top", "bottom"].includes(params.get("from")) ? params.get("from") : "left";
   const WIND = { left: [1, 0], right: [-1, 0], top: [0, 1], bottom: [0, -1] }[FROM];
   const BLOW_MAX = 6.5;        // seconds; wind stops by itself if DONE never arrives
-  const REFILL_DELAY = 1.6;    // seconds after the wind dies before new leaves fall
+  const REFILL_DELAY = 1.8;    // seconds after the wind dies before new leaves fall
+  const LIGHT = [0.55, 0.85];  // direction shadows fall (light from top-left)
+  const PHOTO_LEAF = 58;       // a typical leaf in forest-floor.webp is ~58 px long
+  const LEAF_SCALE = 1;        // make the animated leaves bigger (e.g. 1.3) or smaller than the photo's leaves
+  let photoScale = 0;          // how much the photo is scaled on this screen (set when it's drawn)
 
   const canvas = document.getElementById("scene");
   const ctx = canvas.getContext("2d");
   let W = 0, H = 0, DPR = 1, ground = null;
 
-  // ------------------------------------------------------------ leaf shapes
-  function maplePath() {
-    const p = new Path2D(), n = 120;
-    for (let i = 0; i <= n; i++) {
-      const t = (i / n) * Math.PI * 2;
-      let r = 0.55 + 0.45 * Math.pow(Math.abs(Math.cos((5 * (t + Math.PI / 2)) / 2)), 2.2);
-      const d = Math.atan2(Math.sin(t - Math.PI / 2), Math.cos(t - Math.PI / 2)); // distance from "down"
-      r *= 1 - 0.55 * Math.exp(-(d * d) / 0.06);
-      const x = Math.cos(t) * r, y = Math.sin(t) * r;
-      i ? p.lineTo(x, y) : p.moveTo(x, y);
-    }
-    p.closePath();
-    return p;
-  }
-  function ovalPath() {
-    const p = new Path2D();
-    p.moveTo(0, -1);
-    p.bezierCurveTo(0.62, -0.55, 0.55, 0.55, 0, 0.92);
-    p.bezierCurveTo(-0.55, 0.55, -0.62, -0.55, 0, -1);
-    return p;
-  }
-  function oakPath() {
-    const p = new Path2D(), n = 90;
-    for (let i = 0; i <= n; i++) {
-      const s = i / n, y = -1 + 2 * s;
-      const w = Math.sin(Math.PI * s) * (0.42 + 0.14 * Math.sin(s * Math.PI * 9));
-      i ? p.lineTo(w, y) : p.moveTo(w, y);
-    }
-    for (let i = n; i >= 0; i--) {
-      const s = i / n, y = -1 + 2 * s;
-      const w = Math.sin(Math.PI * s) * (0.42 + 0.14 * Math.sin(s * Math.PI * 9));
-      p.lineTo(-w, y);
-    }
-    p.closePath();
-    return p;
-  }
-  const SHAPES = [
-    { path: maplePath(), veins: [[0, 0.5, 0, -0.95], [0, 0.1, 0.8, -0.35], [0, 0.1, -0.8, -0.35], [0, 0.3, 0.6, 0.45], [0, 0.3, -0.6, 0.45]], stem: 0.5 },
-    { path: ovalPath(), veins: [[0, 0.92, 0, -0.9], [0, 0.2, 0.35, -0.2], [0, 0.2, -0.35, -0.2], [0, 0.5, 0.3, 0.2], [0, 0.5, -0.3, 0.2]], stem: 0.92 },
-    { path: oakPath(), veins: [[0, 1, 0, -0.95], [0, -0.3, 0.35, -0.5], [0, -0.3, -0.35, -0.5], [0, 0.3, 0.35, 0.1], [0, 0.3, -0.35, 0.1]], stem: 1 },
-  ];
-  const COLORS = ["#c0392b", "#d35400", "#e67e22", "#f39c12", "#b9770e", "#a04000", "#d4a017", "#9c2a1b", "#e8a33d", "#7f8c2e"];
-
-  // ------------------------------------------------------------ state
-  let leaves = [], streaks = [];
-  let target = 40;
-  let phase = "idle";          // idle | calm | wind | settle
-  let windT = 0, windEnd = 0, settleT = 0, spawnTimer = 0;
-  let last = performance.now();
-
   const rand = (a, b) => a + Math.random() * (b - a);
   const pick = (arr) => arr[(Math.random() * arr.length) | 0];
+  const TAU = Math.PI * 2;
+  function rgba(hex, a) {
+    const n = parseInt(hex.slice(1), 16);
+    return `rgba(${n >> 16},${(n >> 8) & 255},${n & 255},${a})`;
+  }
+
+  // ============================================================ fallen leaves: the "A + B mix" from leaf-lab.html
+  // Leaves are painted once into images (sprites) when the page loads. This block is copied from
+  // leaf-lab.html (shapes → painting helpers → wear and tear → styles A and B); change both together.
+  const S = 256, U = S * 0.4;          // sprite size; pixels per leaf unit
+  function newCanvas(w = S, h = S) { const c = document.createElement("canvas"); c.width = w; c.height = h; return c; }
+
+  // ---------------------------------------------------------------- shapes (unit size, tip at y = -1)
+  // a slow, irregular wobble along the outline so no two edges are perfectly smooth
+  function wobble(amount) {
+    const k = [];
+    for (let i = 0; i < 5; i++) k.push([Math.round(rand(3, 17)), rand(0, TAU), rand(0.3, 1) * amount]);
+    return (t) => k.reduce((s, [f, p, a]) => s + a * Math.sin(f * t + p), 0);
+  }
+  function toPath(pts) { const p = new Path2D(); pts.forEach(([x, y], i) => (i ? p.lineTo(x, y) : p.moveTo(x, y))); p.closePath(); return p; }
+
+  function maple() {
+    const w = rand(19, 25), lowH = rand(0.5, 0.7), sideA = rand(52, 60), lowA = rand(108, 120);
+    const teeth = rand(0.025, 0.045), nt = Math.round(rand(26, 34)), R0 = 0.4, j = wobble(0.012);
+    const lobes = [[0, 1], [-sideA, rand(0.86, 0.96)], [sideA, rand(0.86, 0.96)], [-lowA, lowH], [lowA, lowH]];
+    const pts = [];
+    for (let i = 0; i <= 420; i++) {
+      const a = -180 + (360 * i) / 420, t = (a * Math.PI) / 180;
+      let peak = 0;
+      for (const [c, h] of lobes) peak = Math.max(peak, h * Math.exp(-Math.pow(Math.abs(a - c) / w, 1.4)));
+      let r = R0 + (1 - R0) * peak;
+      r *= 1 + teeth * (1 - Math.abs(Math.sin(t * nt))) - teeth * 0.6;
+      const d = 180 - Math.abs(a);
+      r *= (1 - 0.8 * Math.exp(-(d * d) / 700)) * (1 + j(t));
+      pts.push([Math.sin(t) * r, -Math.cos(t) * r]);
+    }
+    const base = [0, 0.08];
+    const veins = lobes.map(([c, h], i) => {
+      const t = (c * Math.PI) / 180, r = (R0 + (1 - R0) * h) * 0.9;
+      const x = Math.sin(t) * r, y = -Math.cos(t) * r;
+      return [base[0], base[1], x * 0.45 + rand(-0.04, 0.04), y * 0.45, x, y, i ? 0.024 : 0.03];
+    });
+    return { pts, path: toPath(pts), veins, base, stem: [0, 0.08, 0.04, 0.35, rand(-0.06, 0.1), 0.62] };
+  }
+
+  function pinnate(widthFn, nVeins, stemLen) {
+    const n = 160, bend = rand(-0.08, 0.08), j = wobble(0.015);
+    const Y = (s) => -1 + 1.85 * s, C = (s) => bend * Math.sin(Math.PI * s);
+    const pts = [];
+    for (let i = 0; i <= n; i++) { const s = i / n; pts.push([C(s) + widthFn(s) * (1 + j(s * Math.PI)), Y(s)]); }
+    for (let i = n; i >= 0; i--) { const s = i / n; pts.push([C(s) - widthFn(s) * (1 + j(TAU - s * Math.PI)), Y(s)]); }
+    const veins = [[C(1), Y(1), C(0.5), Y(0.5), C(0.03), Y(0.03), 0.028]];
+    for (let k = 1; k <= nVeins; k++) {
+      const s = 0.1 + (0.82 * k) / (nVeins + 1);
+      for (const sg of [-1, 1]) {
+        const s2 = Math.max(0.02, s - 0.14);
+        veins.push([C(s), Y(s), C(s) + sg * widthFn(s) * 0.5, Y(s) - 0.06, C(s2) + sg * widthFn(s2) * 0.85, Y(s2), 0.014]);
+      }
+    }
+    return { pts, path: toPath(pts), veins, base: [C(1), Y(1)], stem: [C(1), Y(1), C(1) + rand(-0.04, 0.04), Y(1) + stemLen * 0.5, C(1) + rand(-0.08, 0.08), Y(1) + stemLen] };
+  }
+  const saw = (s, n) => (s * n) % 1;
+  function oak() {
+    const L = rand(4.2, 5.6), deep = rand(0.35, 0.5);
+    return pinnate((s) => 0.5 * Math.pow(Math.sin(Math.PI * Math.pow(s, 0.8)), 0.9) * ((1 - deep) + deep * Math.abs(Math.sin(s * Math.PI * L))) * (1.1 - 0.35 * s), Math.round(L), 0.2);
+  }
+  function beech() {     // oval with a wavy edge, like the many plain oval leaves in the photo
+    const wid = rand(0.48, 0.58), wav = rand(0.02, 0.04), n = rand(8, 12);
+    return pinnate((s) => wid * Math.pow(Math.sin(Math.PI * Math.pow(s, 1.15)), 0.75) * (1 + wav * Math.sin(s * Math.PI * n)), 8, 0.2);
+  }
+  function elm() {
+    const t = rand(0.03, 0.05), wid = rand(0.44, 0.54);
+    return pinnate((s) => wid * Math.pow(Math.sin(Math.PI * Math.pow(s, 1.3)), 0.8) * (1 + t * saw(s, 26) - t * 0.5), 7, 0.22);
+  }
+  const KINDS = [maple, maple, oak, oak, oak, beech, beech, elm];
+
+  // colours taken from the photo: centre → middle → edge, stem
+  const PALETTES = [
+    { inner: "#ec8a36", mid: "#d8682a", outer: "#b0461e", stem: "#5e2a12" },
+    { inner: "#dc7030", mid: "#c04c22", outer: "#92301a", stem: "#4f1e0e" },
+    { inner: "#cc5026", mid: "#ac3a1e", outer: "#802616", stem: "#4a160c" },
+    { inner: "#eaa952", mid: "#d68a3e", outer: "#ad632e", stem: "#5e3818" },
+    { inner: "#dcbc8a", mid: "#c99f6c", outer: "#a07a50", stem: "#5a4128" },
+    { inner: "#b87444", mid: "#9a5632", outer: "#743c26", stem: "#45230f" },
+    { inner: "#f0c055", mid: "#e09e38", outer: "#ba7224", stem: "#6a4416" },
+    { inner: "#d46444", mid: "#b04634", outer: "#822e24", stem: "#4a1a12" },
+  ];
+  // brown-reds for A: russet, chestnut, oxblood, cinnamon, burnt sienna (+ one orange, one tan for variety)
+  const BROWN_RED = [
+    { inner: "#e08a52", mid: "#cc6a3e", outer: "#a84a2c", stem: "#5a2410" },  // russet
+    { inner: "#d8704c", mid: "#c0543a", outer: "#9a3c2a", stem: "#4f1e0e" },  // red-brown
+    { inner: "#d4603c", mid: "#bc4a30", outer: "#963624", stem: "#4a160c" },  // brick
+    { inner: "#e09a60", mid: "#c87a48", outer: "#a45c34", stem: "#5e3818" },  // cinnamon
+    { inner: "#e2783e", mid: "#ca5c30", outer: "#a24224", stem: "#5a2410" },  // burnt sienna
+    { inner: "#cc7458", mid: "#b45a44", outer: "#8e4232", stem: "#4a1a12" },  // dusky rose-brown
+    { inner: "#ea8e48", mid: "#d46e36", outer: "#b05028", stem: "#5e2a12" },  // rust orange
+    { inner: "#d8aa7c", mid: "#c08c60", outer: "#9c6c48", stem: "#5a4128" },  // dry tan
+  ];
+  // slightly drier versions for B (same brightness as the photo, a little browner)
+  const DRY = [
+    { inner: "#cc7a4c", mid: "#b05e3a", outer: "#8a4428", stem: "#45230f" },
+    { inner: "#c46a4a", mid: "#a8503a", outer: "#84382a", stem: "#40180c" },
+    { inner: "#c88a62", mid: "#ac6e4c", outer: "#88523a", stem: "#4a2a16" },
+    { inner: "#d06a44", mid: "#b25034", outer: "#8c3a26", stem: "#45180c" },
+    { inner: "#b8644c", mid: "#9c4c3c", outer: "#783a2e", stem: "#3e1410" },
+    { inner: "#c89a74", mid: "#ac7e5a", outer: "#8a5e42", stem: "#5a4128" },
+  ];
+
+  // ---------------------------------------------------------------- painting helpers
+  function noise(n) {
+    const c = newCanvas(n, n), x = c.getContext("2d"), d = x.createImageData(n, n);
+    for (let i = 0; i < n * n; i++) { const v = Math.random() * 255; d.data[i * 4] = d.data[i * 4 + 1] = d.data[i * 4 + 2] = v; d.data[i * 4 + 3] = 255; }
+    x.putImageData(d, 0, 0);
+    return c;
+  }
+  const unit = (c) => c.setTransform(U, 0, 0, U, S / 2, S / 2);
+  const pixels = (c) => c.setTransform(1, 0, 0, 1, 0, 0);
+
+  function baseColour(c, leaf, pal) {
+    unit(c);
+    const [bx, by] = leaf.base;
+    const g = c.createRadialGradient(bx, by - 0.1, 0.02, bx + rand(-0.2, 0.2), by - 0.4, 1.5);
+    g.addColorStop(0, pal.inner); g.addColorStop(0.5, pal.mid); g.addColorStop(1, pal.outer);
+    c.fillStyle = g; c.fillRect(-1.6, -1.6, 3.2, 3.2);
+  }
+
+  // layered smooth noise: large blotches → medium mottling → fine grain
+  function texture(c, amount) {
+    pixels(c);
+    c.imageSmoothingEnabled = true;
+    c.globalCompositeOperation = "soft-light";
+    for (const [n, a] of [[5, 0.6], [12, 0.45], [32, 0.3], [128, 0.25]]) {
+      c.globalAlpha = a * amount;
+      c.drawImage(noise(n), 0, 0, S, S);
+    }
+    // a few darker, browner patches where the leaf is drying
+    c.globalCompositeOperation = "multiply";
+    c.globalAlpha = 1;
+    for (let i = 0, k = (Math.random() * 4) | 0; i < k; i++) {
+      const x = rand(S * 0.2, S * 0.8), y = rand(S * 0.2, S * 0.8), r = rand(S * 0.06, S * 0.18);
+      const g = c.createRadialGradient(x, y, 0, x, y, r);
+      g.addColorStop(0, `rgba(120,70,45,${rand(0.3, 0.55)})`); g.addColorStop(1, "rgba(120,70,45,0)");
+      c.fillStyle = g; c.fillRect(x - r, y - r, r * 2, r * 2);
+    }
+    c.globalCompositeOperation = "source-over";
+  }
+
+  function veins(c, leaf, dark, light) {
+    unit(c);
+    c.lineCap = "round";
+    for (const [x1, y1, qx, qy, x2, y2, w] of leaf.veins) {
+      c.strokeStyle = `rgba(55,22,6,${dark})`; c.lineWidth = w * 1.1;
+      c.beginPath(); c.moveTo(x1, y1); c.quadraticCurveTo(qx, qy, x2, y2); c.stroke();
+      if (light) {
+        c.strokeStyle = `rgba(255,232,190,${light})`; c.lineWidth = w * 0.45;
+        c.beginPath(); c.moveTo(x1 - 0.008, y1 - 0.008); c.quadraticCurveTo(qx - 0.008, qy - 0.008, x2 - 0.008, y2 - 0.008); c.stroke();
+      }
+    }
+  }
+
+  // cupped leaf: halves catch light differently, edges a little darker
+  function cupShading(c, leaf, s) {
+    unit(c);
+    const g = c.createLinearGradient(-1, 0, 1, 0);
+    g.addColorStop(0, `rgba(25,10,2,${0.14 * s})`);
+    g.addColorStop(0.35, `rgba(255,240,215,${0.06 * s})`);
+    g.addColorStop(0.5, `rgba(25,10,2,${0.05 * s})`);
+    g.addColorStop(0.62, `rgba(255,240,215,${0.03 * s})`);
+    g.addColorStop(1, `rgba(25,10,2,${0.16 * s})`);
+    c.fillStyle = g; c.fillRect(-1.6, -1.6, 3.2, 3.2);
+    // (no dark stroke along the edge: it made every leaf look outlined)
+  }
+
+  // ---------------------------------------------------------------- wear and tear
+  // level 0 = almost intact … 1 = badly degraded. Everything is in leaf units (like the shapes).
+  function damagePlan(leaf, level) {
+    const pts = leaf.pts, n = pts.length;
+    const inward = ([x, y]) => { const dx = -x, dy = -0.1 - y, l = Math.hypot(dx, dy) || 1; return [dx / l, dy / l]; };
+    const cuts = [], rims = [], tears = [];
+    // bites: clusters of overlapping circles, so the bitten edge is irregular
+    for (let i = 0, nb = Math.round(rand(1, 2.5) + level * 3); i < nb; i++) {
+      const p = pick(pts), [ix, iy] = inward(p), r = rand(0.05, 0.11) * (0.7 + level * 0.6);
+      for (let j = 0, m = 2 + ((Math.random() * 3) | 0); j < m; j++) {
+        const c = [p[0] + ix * r * 0.3 + rand(-0.06, 0.06), p[1] + iy * r * 0.3 + rand(-0.06, 0.06), r * rand(0.5, 1)];
+        cuts.push(c); rims.push([c[0], c[1], c[2], 0.05, 0.22]);
+      }
+    }
+    // nibbled, frayed margin: many tiny cuts along the edge
+    for (let i = 0, nn = Math.round(10 + level * 45); i < nn; i++) {
+      const p = pick(pts), [ix, iy] = inward(p), r = rand(0.008, 0.028);
+      cuts.push([p[0] + ix * r * 0.4, p[1] + iy * r * 0.4, r]);     // no dark rim: too many, they'd form an outline
+    }
+    // holes: small irregular clusters inside the blade, with dark dried rims
+    for (let i = 0, nh = Math.round(rand(0, 1.5) + level * 4); i < nh; i++) {
+      const p = pick(pts), f = rand(0.25, 0.7), cx = p[0] * f, cy = p[1] * f + 0.05 * (1 - f);
+      for (let j = 0, m = 1 + ((Math.random() * 3) | 0); j < m; j++) {
+        const c = [cx + rand(-0.03, 0.03), cy + rand(-0.03, 0.03), rand(0.012, 0.04)];
+        cuts.push(c); rims.push([c[0], c[1], c[2], 0.04, 0.35]);
+      }
+    }
+    // sometimes a torn-off piece: a jagged wedge from the edge
+    if (Math.random() < 0.2 + level * 0.45) {
+      const i = (Math.random() * n) | 0, k = Math.round(n * rand(0.03, 0.07));
+      const p0 = pts[i], p1 = pts[(i + k) % n];
+      const mid = [(p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2], [ix, iy] = inward(mid), depth = rand(0.15, 0.32);
+      const tip = [mid[0] + ix * depth + rand(-0.05, 0.05), mid[1] + iy * depth + rand(-0.05, 0.05)];
+      const jag = (a, b) => { const out = []; for (let s = 1; s < 5; s++) { const t = s / 5; out.push([a[0] + (b[0] - a[0]) * t + rand(-0.025, 0.025), a[1] + (b[1] - a[1]) * t + rand(-0.025, 0.025)]); } return out; };
+      const edge = [p0, ...jag(p0, tip), tip, ...jag(tip, p1), p1];
+      const poly = [...edge, [p1[0] - ix * 0.4, p1[1] - iy * 0.4], [p0[0] - ix * 0.4, p0[1] - iy * 0.4]];
+      tears.push({ edge, poly });
+    }
+    return { cuts, rims, tears, level };
+  }
+
+  // painted onto the leaf BEFORE cutting: dry brown margins, and darker dried tissue round every wound
+  function paintWear(c, leaf, plan) {
+    unit(c);
+    c.globalCompositeOperation = "multiply";
+    // no continuous dark margin (it reads as an outline); instead a few dry patches creeping in from the edge
+    for (let i = 0, n = Math.round(plan.level * 3 + Math.random()); i < n; i++) {
+      const [x, y] = pick(leaf.pts), r = rand(0.18, 0.38);
+      const g = c.createRadialGradient(x, y, 0, x, y, r);
+      g.addColorStop(0, "rgba(170,105,70,.55)"); g.addColorStop(1, "rgba(170,105,70,0)");
+      c.fillStyle = g; c.fillRect(x - r, y - r, r * 2, r * 2);
+    }
+    c.globalCompositeOperation = "source-over";
+    for (const [x, y, r, w, a] of plan.rims) {
+      const g = c.createRadialGradient(x, y, r * 0.85, x, y, r + w);
+      g.addColorStop(0, `rgba(55,22,6,${a})`); g.addColorStop(1, "rgba(55,22,6,0)");
+      c.fillStyle = g; c.fillRect(x - r - w, y - r - w, (r + w) * 2, (r + w) * 2);
+    }
+    c.lineJoin = "round"; c.lineCap = "round";
+    for (const t of plan.tears) {
+      c.strokeStyle = "rgba(55,22,6,.18)"; c.lineWidth = 0.04;
+      c.beginPath(); t.edge.forEach(([x, y], i) => (i ? c.lineTo(x, y) : c.moveTo(x, y))); c.stroke();
+    }
+  }
+
+  // silhouette with soft edges (shadow-blur trick works in every browser), with the damage cut out
+  function softMask(leaf, blur, plan) {
+    const m = newCanvas(), c = m.getContext("2d"), off = S * 3;
+    c.setTransform(U, 0, 0, U, S / 2 - off, S / 2);
+    c.shadowColor = "#000"; c.shadowBlur = blur; c.shadowOffsetX = off;
+    c.fillStyle = "#000"; c.fill(leaf.path);
+    c.shadowColor = "transparent";
+    unit(c);
+    c.globalCompositeOperation = "destination-out";
+    for (const [x, y, r] of plan.cuts) {
+      const g = c.createRadialGradient(x, y, r * 0.75, x, y, r);
+      g.addColorStop(0, "#000"); g.addColorStop(1, "rgba(0,0,0,0)");
+      c.fillStyle = g; c.beginPath(); c.arc(x, y, r, 0, TAU); c.fill();
+    }
+    c.fillStyle = "#000";
+    for (const t of plan.tears) { c.beginPath(); t.poly.forEach(([x, y], i) => (i ? c.lineTo(x, y) : c.moveTo(x, y))); c.closePath(); c.fill(); }
+    c.globalCompositeOperation = "source-over";
+    return m;
+  }
+
+  function stem(c, leaf, pal) {
+    unit(c);
+    const [a, b, cx, cy, ex, ey] = leaf.stem;
+    c.lineCap = "round"; c.strokeStyle = rgba(pal.stem, 0.85); c.lineWidth = 0.034;
+    c.beginPath(); c.moveTo(a, b); c.quadraticCurveTo(cx, cy, ex, ey); c.stroke();
+  }
+
+  function finish(content, leaf, pal, blur, level, wear = true) {
+    const c = content.getContext("2d");
+    const plan = damagePlan(leaf, level);
+    if (wear) paintWear(c, leaf, plan);
+    const mask = softMask(leaf, blur, plan);
+    pixels(c);
+    c.globalCompositeOperation = "destination-in";
+    c.drawImage(mask, 0, 0);
+    c.globalCompositeOperation = "destination-over";
+    stem(c, leaf, pal);                                   // stem tucked under the blade
+    c.globalCompositeOperation = "source-over";
+    // contact shadow: the mask, blurred a bit more
+    const sh = newCanvas(), sc = sh.getContext("2d"), off = S * 3;
+    sc.shadowColor = "#000"; sc.shadowBlur = 7; sc.shadowOffsetX = off;
+    sc.drawImage(mask, -off, 0);
+    return { leaf: content, shadow: sh };
+  }
+
+  // ---------------------------------------------------------------- the three styles
+  function styleA() {
+    const leaf = pick(KINDS)(), pal = pick(BROWN_RED), k = newCanvas(), c = k.getContext("2d");
+    baseColour(c, leaf, pal);
+    texture(c, 1);
+    veins(c, leaf, 0.16, 0.07);
+    cupShading(c, leaf, 0.8);
+    return finish(k, leaf, pal, 2.5, rand(0.3, 0.75));
+  }
+
+  function styleB() {
+    const leaf = pick(KINDS)(), pal = pick(DRY), k = newCanvas(), c = k.getContext("2d");
+    baseColour(c, leaf, pal);
+    texture(c, 0.9);
+    // creases: soft wide dark line + thin dark line + thin light ridge
+    unit(c);
+    c.lineCap = "round"; c.lineJoin = "round";
+    for (let i = 0, n = Math.round(rand(7, 13)); i < n; i++) {
+      let x = rand(-0.7, 0.7), y = rand(-0.8, 0.6), a = rand(0, TAU);
+      const line = [[x, y]];
+      for (let s = 0; s < 4; s++) { a += rand(-0.6, 0.6); x += Math.cos(a) * rand(0.1, 0.22); y += Math.sin(a) * rand(0.1, 0.22); line.push([x, y]); }
+      const draw = (dx, dy, col, w) => { c.strokeStyle = col; c.lineWidth = w; c.beginPath(); line.forEach(([px, py], j) => (j ? c.lineTo(px + dx, py + dy) : c.moveTo(px + dx, py + dy))); c.stroke(); };
+      draw(0, 0, "rgba(40,15,4,.09)", 0.09);
+      draw(0, 0, "rgba(40,15,4,.22)", 0.014);
+      draw(-0.014, -0.014, "rgba(255,225,190,.1)", 0.012);
+    }
+    veins(c, leaf, 0.2, 0.14);
+    // cupped: lighter middle, darker rim
+    const cup = c.createRadialGradient(0, -0.15, 0.1, 0, -0.1, 1.25);
+    cup.addColorStop(0, "rgba(255,235,205,.03)"); cup.addColorStop(1, "rgba(20,8,2,.18)");
+    c.fillStyle = cup; c.fillRect(-1.6, -1.6, 3.2, 3.2);
+    // one or two edges curled over, casting shadow inwards
+    for (let i = 0, n = 1 + ((Math.random() * 2) | 0); i < n; i++) {
+      const [px, py] = pick(leaf.pts), r = rand(0.25, 0.4);
+      const g = c.createRadialGradient(px * 0.85, py * 0.85, 0, px * 0.85, py * 0.85, r);
+      g.addColorStop(0, "rgba(25,10,2,.5)"); g.addColorStop(1, "rgba(25,10,2,0)");
+      c.fillStyle = g; c.fillRect(px - 0.6, py - 0.6, 1.2, 1.2);
+      c.strokeStyle = "rgba(255,235,200,.22)"; c.lineWidth = 0.02;
+      c.beginPath(); c.arc(px * 0.97, py * 0.97, r * 0.55, Math.atan2(py, px) - 0.9, Math.atan2(py, px) + 0.9); c.stroke();
+    }
+    cupShading(c, leaf, 0.5);
+    return finish(k, leaf, pal, 2, rand(0.55, 1));
+  }
+
+  // ------------------------------------------------------------ sprites: half style A, half style B
+  // front = the leaf; back = its paler underside (same holes); sharp/soft = shadows for lying vs. flying
+  function blurredShadow(src, blur) {
+    const k = newCanvas(), c = k.getContext("2d"), off = S * 3;
+    c.shadowColor = "#000"; c.shadowBlur = blur; c.shadowOffsetX = off;
+    c.drawImage(src, -off, 0);
+    return k;
+  }
+  // out-of-focus copy: shrunk to a tiny image, then stretched back up when drawn (smooth blur, very cheap)
+  function outOfFocus(src) {
+    const n = 36, k = document.createElement("canvas");
+    k.width = k.height = n;
+    const c = k.getContext("2d");
+    c.drawImage(src, 0, 0, n, n);
+    return k;
+  }
+  const SPRITES = [];
+  for (let i = 0; i < 24; i++) {
+    const front = (i % 2 ? styleA() : styleB()).leaf;
+    const back = newCanvas(), b = back.getContext("2d");
+    b.drawImage(front, 0, 0);
+    b.globalCompositeOperation = "source-atop";
+    b.fillStyle = "rgba(225,210,180,.3)"; b.fillRect(0, 0, S, S);
+    SPRITES.push({ front, back, sharp: blurredShadow(front, 3), soft: blurredShadow(front, 16),
+                   frontBlur: outOfFocus(front), backBlur: outOfFocus(back) });
+  }
+
+  // ------------------------------------------------------------ state
+  let leaves = [], dust = [];
+  let target = 40, layer = 0;
+  let phase = "idle";          // idle | calm | wind | settle
+  let windT = 0, windEnd = 0, settleT = 0, spawnTimer = 0, time = 0;
+  let last = performance.now();
 
   function makeLeaf() {
-    const m = Math.min(W, H);
-    const pad = m * 0.06;
+    const m = Math.min(W, H), pad = m * 0.05;
+    const faceDown = Math.random() < 0.22;
     return {
-      x: rand(pad, W - pad), y: rand(pad, H - pad),
-      size: m * rand(0.055, 0.09),
-      shape: pick(SHAPES), color: pick(COLORS),
-      rot: rand(0, Math.PI * 2), vrot: rand(-2, 2),
-      flip: rand(0, Math.PI * 2), vflip: rand(2, 5),
-      z: rand(1.0, 1.4), vx: 0, vy: 0,
-      state: "drop", age: 0, sway: rand(0, 10),
-      blow: false, blowDelay: 0, grip: 0, wobble: rand(0, 10),
+      // x, y = roughly where it will land; z = height (the camera is at CAM_Z = 3): starts just below the lens
+      x: rand(pad, W - pad), y: rand(pad, H - pad), z: rand(1.9, 2.5),
+      // same size as the leaves in the photo (size = half the leaf's length); before the photo loads, by screen size
+      size: photoScale ? (PHOTO_LEAF * photoScale * rand(0.85, 1.25) * LEAF_SCALE) / 2 : m * rand(0.05, 0.075),
+      spr: pick(SPRITES),
+      vx: 0, vy: 0, vz: 0,
+      rot: rand(0, TAU), rot0: 0, vrot: rand(-1.2, 1.2),
+      fx: 0, fy: 0, vfx: rand(3, 8) * (Math.random() < 0.5 ? -1 : 1), vfy: rand(-2, 2),
+      restFx: (faceDown ? Math.PI : 0) + rand(-0.45, 0.45), restFy: rand(-0.35, 0.35),
+      // falling like a pendulum
+      ph: rand(0, TAU), omega: rand(2.3, 3.4), dir: rand(0, TAU), amp: m * rand(0.1, 0.2), tumbler: Math.random() < 0.3,
+      state: "drop", age: 0, w: rand(0, 100), layer: 0, landT: 0, fx0: 0, fy0: 0,
+      blow: false, blowDelay: 0, slideT: 0, flier: true,
     };
   }
 
@@ -126,28 +450,48 @@
     if (phase === "idle" || phase === "wind") return;
     phase = "wind"; windT = 0; windEnd = BLOW_MAX;
     for (const l of leaves) {
-      if (l.state !== "rest" && l.state !== "drop") continue;
       const u = along(l);
-      l.blow = Math.random() < 0.3 + 0.4 * (1 - u);       // nearer the fan → more likely to go
-      l.blowDelay = u * 0.9 + rand(0.05, 3.0);            // the gust front crosses, then leaves let go one by one
+      l.blow = Math.random() < 0.35 + 0.45 * (1 - u);      // nearer the fan → more likely to go
+      l.blowDelay = u * 0.9 + rand(0.05, 2.8);             // the gust front crosses, then leaves let go one by one
     }
   }
   function stopWind() {
     if (phase !== "wind") return;
-    windEnd = Math.min(windEnd, windT + 0.6);              // fade out over 0.6 s
+    windEnd = Math.min(windEnd, windT + 0.8);              // wind dies over 0.8 s
   }
 
   // ------------------------------------------------------------ simulation
   function windStrength() {
     if (phase !== "wind") return 0;
-    const ramp = Math.min(1, windT / 0.5) * Math.min(1, Math.max(0, (windEnd - windT) / 0.6));
-    const gust = 0.75 + 0.15 * Math.sin(windT * 5.3) + 0.1 * Math.sin(windT * 13.1 + 1);
+    const ramp = Math.min(1, windT / 0.6) * Math.min(1, Math.max(0, (windEnd - windT) / 0.8));
+    const gust = 0.78 + 0.14 * Math.sin(windT * 4.7) + 0.08 * Math.sin(windT * 11.3 + 1);
     return ramp * gust;
+  }
+
+  // wind velocity at a point: gust bands travel downwind, with sideways swirls
+  function windAt(x, y, s, m) {
+    const p = (x * WIND[0] + y * WIND[1]) / m, q = (-x * WIND[1] + y * WIND[0]) / m;
+    const g = s * (0.72 + 0.28 * Math.sin(p * 3.1 - time * 6 + q * 2.2));
+    const cross = s * (0.38 * Math.sin(q * 4.3 + time * 2.3 + p * 2) + 0.22 * Math.sin(p * 7 - time * 4.1 + q));
+    const speed = m * 2.8;
+    return [(WIND[0] * g - WIND[1] * cross) * speed, (WIND[1] * g + WIND[0] * cross) * speed];
+  }
+
+  const nearest = (from, to) => to + TAU * Math.round((from - to) / TAU);
+
+  function land(l) {
+    l.state = "land"; l.landT = 0; l.z = 0;
+    // whichever side ends up facing up is the side it lands on
+    if (Math.cos(l.fx) * Math.cos(l.fy) < 0 !== Math.cos(l.restFx) < 0) l.restFx += Math.PI;
+    l.fx0 = l.fx; l.fy0 = l.fy;
+    l.restFx = nearest(l.fx, l.restFx); l.restFy = nearest(l.fy, l.restFy);
+    l.layer = ++layer;
   }
 
   function step(dt) {
     const m = Math.min(W, H);
     const s = windStrength();
+    time += dt;
 
     if (phase === "wind") {
       windT += dt;
@@ -160,148 +504,274 @@
     // new leaves drift in until the ground is full again
     if (phase === "calm") {
       spawnTimer -= dt;
-      const alive = leaves.filter((l) => l.state !== "gone").length;
-      if (alive < target && spawnTimer <= 0) { leaves.push(makeLeaf()); spawnTimer = rand(0.08, 0.22); }
+      if (leaves.length < target && spawnTimer <= 0) { leaves.push(makeLeaf()); spawnTimer = rand(0.1, 0.28); }
     }
 
     for (const l of leaves) {
       l.age += dt;
-      if (l.state === "drop") {
-        // falling towards the ground (z → 0), swaying and spinning
-        l.z = Math.max(0, l.z - dt * 0.75);
-        l.x += Math.sin(l.age * 2.2 + l.sway) * m * 0.12 * dt * l.z;
-        l.y += Math.cos(l.age * 1.7 + l.sway) * m * 0.05 * dt * l.z;
-        l.rot += l.vrot * dt * (0.3 + l.z);
-        l.flip += l.vflip * dt * l.z;
-        if (l.z === 0) { l.state = "rest"; l.flip = 0; }
-      }
+      const reached = phase === "wind" && windT > along(l) * 0.9;
+      const goes = reached && l.blow && windT > l.blowDelay && s > 0.3;
 
-      if ((l.state === "rest" || l.state === "drop") && phase === "wind") {
-        const reached = windT > along(l) * 0.9;
-        if (reached && l.blow && windT > l.blowDelay && s > 0.3) {
-          l.state = "fly";
-          l.vx = 0; l.vy = 0;
-          l.vrot = rand(-9, 9);
-          l.vflip = rand(6, 14);
-        } else if (reached && l.state === "rest") {
-          // held down: tremble and creep a little downwind
-          l.wobble += dt * 18;
-          l.rot += Math.sin(l.wobble) * 0.03 * s;
-          l.x += WIND[0] * m * 0.012 * s * dt;
-          l.y += WIND[1] * m * 0.012 * s * dt;
+      if (l.state === "drop") {
+        if (goes) { l.state = "fly"; l.vz = 0; continue; }
+        // pendulum fall: glides sideways, drops fastest at the turning points
+        l.ph += dt * l.omega;
+        const sw = Math.sin(l.ph), cw = Math.cos(l.ph);
+        const v = l.amp * cw * Math.min(1, l.z * 1.5 + 0.2);
+        l.x += (Math.cos(l.dir) * v + l.vx) * dt;
+        l.y += (Math.sin(l.dir) * v + l.vy) * dt;
+        l.vx *= 1 - 1.4 * dt; l.vy *= 1 - 1.4 * dt;
+        l.z -= dt * (0.2 + 0.5 * sw * sw) * (1 + l.z * 0.45);   // a bit faster while high up
+        l.rot0 += l.vrot * 0.3 * dt;
+        l.rot = l.rot0 + 0.5 * sw;
+        if (l.tumbler) { l.fx += l.vfx * dt; l.fy += l.vfy * dt * 0.3; }
+        else { l.fx = 0.95 * sw; l.fy = 0.25 * Math.sin(l.ph * 0.5 + l.w); }
+        if (l.z <= 0) land(l);
+      } else if (l.state === "land") {
+        // settle flat with a tiny slide
+        l.landT += dt;
+        const t = Math.min(1, l.landT / 0.4), e = 1 - Math.pow(1 - t, 3);
+        l.fx = l.fx0 + (l.restFx - l.fx0) * e;
+        l.fy = l.fy0 + (l.restFy - l.fy0) * e;
+        l.x += l.vx * dt * (1 - e); l.y += l.vy * dt * (1 - e);
+        if (t >= 1) { l.state = "rest"; l.vx = l.vy = 0; }
+      } else if (l.state === "rest") {
+        if (goes) {
+          l.state = "slide"; l.slideT = rand(0.15, 1.1); l.flier = Math.random() < 0.85;
+          l.vrot = rand(-5, 5); l.vfx = rand(5, 12) * (Math.random() < 0.5 ? -1 : 1); l.vfy = rand(-4, 4);
+          l.vx = l.vy = 0;
+        } else {
+          // the wind lifts the edges: flutter, and a little creep downwind
+          const flutter = reached ? 0.22 + 0.25 * s : 0.02;
+          l.fx = l.restFx + flutter * Math.sin(l.age * (reached ? 21 : 1.3) + l.w) * (reached ? s : 1);
+          l.fy = l.restFy + (reached ? 0.12 * s * Math.sin(l.age * 17 + l.w * 2) : 0);
+          if (reached) {
+            l.x += WIND[0] * m * 0.015 * s * dt; l.y += WIND[1] * m * 0.015 * s * dt;
+            l.rot += Math.sin(l.age * 9 + l.w) * 0.25 * s * dt;
+          }
+        }
+      } else if (l.state === "slide") {
+        // skittering along the ground: friction, spinning, little hops
+        const [wx, wy] = windAt(l.x, l.y, s, m);
+        l.vx += (wx * 0.5 - l.vx) * 2.6 * dt; l.vy += (wy * 0.5 - l.vy) * 2.6 * dt;
+        l.x += l.vx * dt; l.y += l.vy * dt;
+        l.rot += l.vrot * dt;
+        l.fx = l.restFx + 0.55 * Math.sin(l.age * 16 + l.w);
+        l.fy = l.restFy + 0.3 * Math.sin(l.age * 11);
+        l.z = 0.05 * Math.abs(Math.sin(l.age * 8 + l.w));
+        l.slideT -= dt;
+        if (l.flier && l.slideT <= 0 && s > 0.3) { l.state = "fly"; l.vz = rand(0.5, 1.2); }
+        else if (s < 0.05 && Math.hypot(l.vx, l.vy) < m * 0.05) land(l);
+      } else if (l.state === "fly") {
+        // carried by the wind: light leaves follow it quickly, big ones lag; tumbling in 3D
+        const [wx, wy] = windAt(l.x, l.y, s, m);
+        const k = 1.6 * Math.min(1.6, (m * 0.07) / l.size);
+        l.vx += (wx - l.vx) * k * dt; l.vy += (wy - l.vy) * k * dt;
+        l.x += l.vx * dt; l.y += l.vy * dt;
+        const lift = s * (0.45 + 0.35 * Math.sin(l.age * 1.9 + l.w));
+        l.vz += ((lift - l.z) * 3 - l.vz * 1.5) * dt;
+        l.z = Math.max(0.02, l.z + l.vz * dt);
+        l.fx += l.vfx * dt; l.fy += l.vfy * dt;
+        l.vrot += (Math.sin(l.age * 3 + l.w) * 6 - l.vrot * 0.5) * dt;
+        l.rot += l.vrot * dt;
+        if (s < 0.12) {
+          // wind gone: fall back down, keeping some of its speed
+          l.state = "drop"; l.tumbler = true; l.amp *= 0.6; l.ph = 0;
+          l.z = Math.max(l.z, 0.25);
         }
       }
-
-      if (l.state === "fly") {
-        const push = m * 3.2 * Math.max(s, 0.35);
-        const turb = Math.sin(l.age * 6 + l.sway) * m * 1.6;
-        l.vx += (WIND[0] * push + -WIND[1] * turb) * dt;
-        l.vy += (WIND[1] * push + WIND[0] * turb) * dt;
-        l.vx *= 1 - 1.2 * dt; l.vy *= 1 - 1.2 * dt;
-        l.x += l.vx * dt; l.y += l.vy * dt;
-        l.z = Math.min(0.55, l.z + dt * 0.9) * (0.85 + 0.15 * Math.sin(l.age * 9));
-        l.rot += l.vrot * dt;
-        l.flip += l.vflip * dt;
-        const out = l.size * 2;
-        if (l.x < -out || l.x > W + out || l.y < -out || l.y > H + out) l.state = "gone";
-      }
+      const out = l.size * 3;
+      if (l.x < -out || l.x > W + out || l.y < -out || l.y > H + out) l.state = "gone";
     }
     leaves = leaves.filter((l) => l.state !== "gone");
 
-    // wind streaks
-    if (s > 0.2 && streaks.length < 26 && Math.random() < s * 0.9) {
-      const across = Math.random();
-      streaks.push({
-        x: WIND[0] ? (WIND[0] > 0 ? -60 : W + 60) : across * W,
-        y: WIND[1] ? (WIND[1] > 0 ? -60 : H + 60) : across * H,
-        len: m * rand(0.15, 0.4), speed: m * rand(1.6, 2.6), life: 0, wav: rand(0, 6),
-      });
+    // dust and leaf crumbs carried by the wind
+    if (s > 0.2 && dust.length < 90) {
+      for (let i = 0; i < 3; i++) {
+        if (Math.random() > s) continue;
+        const across = Math.random();
+        dust.push({
+          x: WIND[0] ? (WIND[0] > 0 ? -10 : W + 10) : across * W,
+          y: WIND[1] ? (WIND[1] > 0 ? -10 : H + 10) : across * H,
+          vx: 0, vy: 0, r: rand(0.6, 2.2), a: rand(0.15, 0.45), streak: Math.random() < 0.12,
+          col: pick(["210,180,140", "150,110,70", "235,215,180", "120,70,35"]),
+        });
+      }
     }
-    for (const k of streaks) {
-      k.x += WIND[0] * k.speed * dt; k.y += WIND[1] * k.speed * dt; k.life += dt;
+    for (const d of dust) {
+      const [wx, wy] = windAt(d.x, d.y, Math.max(s, 0.15), m);
+      d.vx += (wx * 1.3 - d.vx) * 4 * dt; d.vy += (wy * 1.3 - d.vy) * 4 * dt;
+      d.x += d.vx * dt; d.y += d.vy * dt;
     }
-    streaks = streaks.filter((k) => k.x > -200 && k.x < W + 200 && k.y > -200 && k.y < H + 200);
+    dust = dust.filter((d) => d.x > -40 && d.x < W + 40 && d.y > -40 && d.y < H + 40);
   }
 
   // ------------------------------------------------------------ drawing
+  // forest-floor photo (forest-floor.webp next to this page); until it loads, a drawn ground is shown
+  const photo = new Image();
+  photo.onload = () => { ground = makeGround(); };
+  photo.src = "forest-floor.webp";
+
   function makeGround() {
     const g = document.createElement("canvas");
     g.width = W * DPR; g.height = H * DPR;
     const c = g.getContext("2d");
     c.scale(DPR, DPR);
-    const grad = c.createRadialGradient(W * 0.5, H * 0.45, 0, W * 0.5, H * 0.5, Math.hypot(W, H) * 0.6);
-    grad.addColorStop(0, "#5a4126"); grad.addColorStop(0.6, "#3d2b19"); grad.addColorStop(1, "#22170d");
+    if (photo.complete && photo.naturalWidth) {
+      // fill the screen; turn the photo sideways on a tall phone screen so less of it is cut off
+      const pw = photo.naturalWidth, ph = photo.naturalHeight;
+      const turn = (H > W) !== (ph > pw);
+      const iw = turn ? ph : pw, ih = turn ? pw : ph;
+      const k = Math.max(W / iw, H / ih);
+      photoScale = k;
+      c.save();
+      c.translate(W / 2, H / 2);
+      if (turn) c.rotate(Math.PI / 2);
+      c.drawImage(photo, (-pw * k) / 2, (-ph * k) / 2, pw * k, ph * k);
+      c.restore();
+      // a soft vignette, like the photo's own lighting
+      const v = c.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.4, W / 2, H / 2, Math.hypot(W, H) * 0.62);
+      v.addColorStop(0, "rgba(0,0,0,0)"); v.addColorStop(1, "rgba(0,0,0,.35)");
+      c.fillStyle = v; c.fillRect(0, 0, W, H);
+      return g;
+    }
+    const m = Math.min(W, H);
+    const grad = c.createRadialGradient(W * 0.45, H * 0.4, 0, W * 0.5, H * 0.5, Math.hypot(W, H) * 0.6);
+    grad.addColorStop(0, "#5b4128"); grad.addColorStop(0.6, "#43301d"); grad.addColorStop(1, "#2a1d10");
     c.fillStyle = grad; c.fillRect(0, 0, W, H);
-    // soil specks and pebbles
-    for (let i = 0; i < (W * H) / 260; i++) {
-      c.fillStyle = `rgba(${pick(["255,230,190", "20,12,6", "120,95,60"])},${rand(0.04, 0.14)})`;
-      c.beginPath(); c.arc(rand(0, W), rand(0, H), rand(0.5, 2.2), 0, 7); c.fill();
+    // patches of damp / dry soil
+    for (let i = 0; i < 40; i++) {
+      const x = rand(0, W), y = rand(0, H), r = rand(m * 0.05, m * 0.25);
+      const pg = c.createRadialGradient(x, y, 0, x, y, r);
+      const col = pick(["20,12,5", "110,85,55", "60,45,25"]);
+      pg.addColorStop(0, `rgba(${col},${rand(0.08, 0.2)})`); pg.addColorStop(1, `rgba(${col},0)`);
+      c.fillStyle = pg; c.fillRect(x - r, y - r, r * 2, r * 2);
     }
-    // a few twigs
+    // old, flattened leaf litter underneath
+    const litter = Math.round((W * H) / 2200);
+    for (let i = 0; i < litter; i++) {
+      const sp = pick(SPRITES), k = (m * rand(0.035, 0.07)) / U;
+      c.save();
+      c.translate(rand(-20, W + 20), rand(-20, H + 20)); c.rotate(rand(0, TAU));
+      c.scale(k * (Math.random() < 0.3 ? -1 : 1) * rand(0.6, 1), k);
+      c.globalAlpha = rand(0.35, 0.7);
+      c.drawImage(Math.random() < 0.3 ? sp.back : sp.front, -S / 2, -S / 2);
+      c.restore();
+    }
+    c.fillStyle = "rgba(45,30,16,.58)"; c.fillRect(0, 0, W, H);   // push the litter back, make it duller
+    // soil grains
+    for (let i = 0; i < (W * H) / 200; i++) {
+      c.fillStyle = `rgba(${pick(["255,230,190", "20,12,6", "120,95,60"])},${rand(0.04, 0.16)})`;
+      c.beginPath(); c.arc(rand(0, W), rand(0, H), rand(0.4, 1.8), 0, TAU); c.fill();
+    }
+    // pebbles with a highlight and a shadow
+    for (let i = 0; i < (W * H) / 16000; i++) {
+      const x = rand(0, W), y = rand(0, H), rx = rand(2, 6), ry = rx * rand(0.6, 0.95), a = rand(0, 3);
+      c.fillStyle = "rgba(10,5,0,.35)"; c.beginPath(); c.ellipse(x + 1.5, y + 2, rx, ry, a, 0, TAU); c.fill();
+      const pg = c.createRadialGradient(x - rx * 0.4, y - ry * 0.4, 0, x, y, rx);
+      const base = pick(["140,125,105", "110,95,80", "160,140,115"]);
+      pg.addColorStop(0, `rgba(${base},1)`); pg.addColorStop(1, "rgba(55,45,35,1)");
+      c.fillStyle = pg; c.beginPath(); c.ellipse(x, y, rx, ry, a, 0, TAU); c.fill();
+    }
+    // twigs
     c.lineCap = "round";
-    for (let i = 0; i < 9; i++) {
-      const x = rand(0, W), y = rand(0, H), a = rand(0, 7), len = rand(20, 70);
-      c.strokeStyle = `rgba(30,18,8,${rand(0.35, 0.6)})`; c.lineWidth = rand(1.5, 3.5);
-      c.beginPath(); c.moveTo(x, y);
-      c.quadraticCurveTo(x + Math.cos(a) * len * 0.5 + rand(-8, 8), y + Math.sin(a) * len * 0.5 + rand(-8, 8),
-                         x + Math.cos(a) * len, y + Math.sin(a) * len);
-      c.stroke();
+    for (let i = 0; i < 10; i++) {
+      const x = rand(0, W), y = rand(0, H), a = rand(0, 7), len = rand(25, 90);
+      const x2 = x + Math.cos(a) * len, y2 = y + Math.sin(a) * len;
+      const qx = x + Math.cos(a) * len * 0.5 + rand(-8, 8), qy = y + Math.sin(a) * len * 0.5 + rand(-8, 8);
+      const lw = rand(1.5, 3.5);
+      c.strokeStyle = "rgba(10,5,0,.35)"; c.lineWidth = lw;
+      c.beginPath(); c.moveTo(x + 2, y + 2.5); c.quadraticCurveTo(qx + 2, qy + 2.5, x2 + 2, y2 + 2.5); c.stroke();
+      c.strokeStyle = "#3b2513"; c.beginPath(); c.moveTo(x, y); c.quadraticCurveTo(qx, qy, x2, y2); c.stroke();
+      c.strokeStyle = "rgba(190,150,100,.3)"; c.lineWidth = lw * 0.35;
+      c.beginPath(); c.moveTo(x - 0.5, y - 0.6); c.quadraticCurveTo(qx - 0.5, qy - 0.6, x2 - 0.5, y2 - 0.6); c.stroke();
     }
+    // vignette
+    const v = c.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.35, W / 2, H / 2, Math.hypot(W, H) * 0.62);
+    v.addColorStop(0, "rgba(0,0,0,0)"); v.addColorStop(1, "rgba(0,0,0,.45)");
+    c.fillStyle = v; c.fillRect(0, 0, W, H);
     return g;
   }
 
-  function drawLeaf(l, shadowPass) {
-    const scale = l.size * (1 + l.z * 0.7);
-    const sx = Math.cos(l.flip);
-    ctx.save();
-    if (shadowPass) {
-      const off = 3 + l.z * Math.min(W, H) * 0.05;
-      ctx.translate(l.x + off, l.y + off * 1.2);
-      ctx.rotate(l.rot);
-      ctx.scale(scale * Math.max(Math.abs(sx), 0.15), scale);
-      ctx.fillStyle = `rgba(10,5,0,${0.38 - l.z * 0.15})`;
-      ctx.fill(l.shape.path);
-      ctx.restore();
-      return;
-    }
-    ctx.translate(l.x, l.y);
-    ctx.rotate(l.rot);
-    ctx.scale(scale * (Math.abs(sx) < 0.15 ? 0.15 * Math.sign(sx || 1) : sx), scale);
-    ctx.fillStyle = l.color;
-    ctx.fill(l.shape.path);
-    // underside is a bit paler
-    if (sx < 0) { ctx.fillStyle = "rgba(255,240,200,.18)"; ctx.fill(l.shape.path); }
-    ctx.strokeStyle = "rgba(60,25,5,.45)";
-    ctx.lineWidth = 0.045;
-    ctx.beginPath();
-    for (const [x1, y1, x2, y2] of l.shape.veins) { ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); }
-    ctx.moveTo(0, l.shape.stem); ctx.lineTo(0.05, l.shape.stem + 0.35);
-    ctx.stroke();
-    ctx.restore();
+  function leafScale(l) {
+    let sx = Math.cos(l.fx), sy = Math.cos(l.fy);
+    if (Math.abs(sx) < 0.06) sx = 0.06 * (sx < 0 ? -1 : 1);
+    if (Math.abs(sy) < 0.06) sy = 0.06 * (sy < 0 ? -1 : 1);
+    return [sx, sy];
   }
 
-  function draw() {
+  // ---- camera perspective: the phone screen is a camera looking straight down from height CAM_Z.
+  // A leaf at height z looks proj(z) times bigger, and further from the screen centre — so a leaf
+  // falling from near the camera starts huge / outside the frame and drifts in towards where it lands.
+  const CAM_Z = 3;
+  const proj = (z) => 1 / (1 - Math.min(z, CAM_Z * 0.9) / CAM_Z);
+  const onScreen = (l, s) => [W / 2 + (l.x - W / 2) * s, H / 2 + (l.y - H / 2) * s];
+
+  function drawShadow(l, m) {
+    // the shadow lies on the ground under the leaf: no perspective, wider and fainter the higher the leaf
+    const [sx, sy] = leafScale(l);
+    const k = l.size / U;
+    const off = 2 + Math.min(l.z, 1.2) * m * 0.14;
+    const softness = Math.min(1, l.z * 1.6);
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-    if (ground) ctx.drawImage(ground, 0, 0, W, H); else { ctx.fillStyle = "#2b1d12"; ctx.fillRect(0, 0, W, H); }
+    ctx.translate(l.x + LIGHT[0] * off, l.y + LIGHT[1] * off);
+    ctx.rotate(l.rot);
+    const spread = 1 + Math.min(l.z, 2) * 0.3;
+    ctx.scale(sx * k * spread, sy * k * spread);
+    const a = (0.5 * (1 - Math.min(l.z, 1) * 0.55)) / (1 + l.z * 0.8) * Math.min(1, l.age / 0.5);
+    if (softness < 1) { ctx.globalAlpha = a * (1 - softness); ctx.drawImage(l.spr.sharp, -S / 2, -S / 2); }
+    if (softness > 0) { ctx.globalAlpha = a * softness; ctx.drawImage(l.spr.soft, -S / 2, -S / 2); }
+    ctx.globalAlpha = 1;
+  }
 
-    const order = leaves.slice().sort((a, b) => a.z - b.z);
-    for (const l of order) drawLeaf(l, true);
-    for (const l of order) drawLeaf(l, false);
+  function drawLeaf(l) {
+    const [sx, sy] = leafScale(l);
+    const s = proj(l.z);
+    const [px, py] = onScreen(l, s);
+    const k = (l.size * s) / U;
+    const r = l.size * s * 1.2;
+    if (px < -r || px > W + r || py < -r || py > H + r) return;      // outside the frame
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.translate(px, py);
+    ctx.rotate(l.rot);
+    ctx.scale(sx * k, sy * k);
+    const back = sx * sy < 0;
+    // the camera is focused on the ground: leaves close to the lens are out of focus
+    const blur = Math.min(1, Math.max(0, (s - 1.6) / 2.2));
+    const fade = Math.min(1, l.age / 0.3);                            // no popping in mid-frame
+    if (blur < 1) { ctx.globalAlpha = fade * (1 - blur); ctx.drawImage(back ? l.spr.back : l.spr.front, -S / 2, -S / 2); }
+    if (blur > 0) { ctx.globalAlpha = fade * blur * 0.92; ctx.drawImage(back ? l.spr.backBlur : l.spr.frontBlur, -S / 2, -S / 2, S, S); }
+    ctx.globalAlpha = 1;
+  }
 
-    const s = windStrength();
+  const ORDER = { rest: 0, land: 0, slide: 1, drop: 2, fly: 2 };
+  function draw() {
+    const m = Math.min(W, H);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    if (ground && ground.width && ground.height) ctx.drawImage(ground, 0, 0, W, H); else { ctx.fillStyle = "#2b1d12"; ctx.fillRect(0, 0, W, H); }
+
+    const order = leaves.slice().sort((a, b) => (ORDER[a.state] - ORDER[b.state]) ||
+      (ORDER[a.state] === 2 ? a.z - b.z : a.layer - b.layer));
+    // shadows of ground leaves, then ground leaves, then shadows of airborne leaves, then airborne leaves
+    let i = 0;
+    const lowEnd = order.findIndex((l) => ORDER[l.state] === 2);
+    const split = lowEnd < 0 ? order.length : lowEnd;
+    for (i = 0; i < split; i++) drawShadow(order[i], m);
+    for (i = 0; i < split; i++) drawLeaf(order[i]);
+    for (i = split; i < order.length; i++) drawShadow(order[i], m);
+    for (i = split; i < order.length; i++) drawLeaf(order[i]);
+
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
     ctx.lineCap = "round";
-    for (const k of streaks) {
-      const a = Math.min(1, k.life * 3) * 0.22 * Math.max(s, 0.1);
-      ctx.strokeStyle = `rgba(255,245,225,${a})`;
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      const nx = -WIND[1], ny = WIND[0];
-      for (let i = 0; i <= 12; i++) {
-        const t = i / 12, wv = Math.sin(t * 6 + k.wav + k.life * 4) * 6;
-        const x = k.x - WIND[0] * k.len * t + nx * wv, y = k.y - WIND[1] * k.len * t + ny * wv;
-        i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    for (const d of dust) {
+      if (d.streak) {
+        const sp = Math.hypot(d.vx, d.vy) || 1;
+        ctx.strokeStyle = `rgba(${d.col},${d.a * 0.35})`; ctx.lineWidth = d.r * 0.8;
+        ctx.beginPath(); ctx.moveTo(d.x, d.y); ctx.lineTo(d.x - (d.vx / sp) * 26, d.y - (d.vy / sp) * 26); ctx.stroke();
+      } else {
+        ctx.fillStyle = `rgba(${d.col},${d.a})`;
+        ctx.fillRect(d.x, d.y, d.r, d.r * 0.7);
       }
-      ctx.stroke();
     }
   }
 
@@ -309,7 +779,7 @@
     DPR = Math.min(window.devicePixelRatio || 1, 2);
     W = window.innerWidth; H = window.innerHeight;
     canvas.width = W * DPR; canvas.height = H * DPR;
-    target = Math.round(Math.max(24, Math.min(60, (W * H) / 9000)));
+    target = Math.round(Math.max(30, Math.min(80, (W * H) / 5800)));
     ground = makeGround();
     for (const l of leaves) { l.x = Math.min(l.x, W - 10); l.y = Math.min(l.y, H - 10); }
   }
@@ -327,7 +797,7 @@
   requestAnimationFrame(frame);
 
   // for testing from the console: leavesScene.blow(), leavesScene.done()
-  window.leavesScene = { blow: startWind, done: stopWind, get leaves() { return leaves; }, get phase() { return phase; } };
+  window.leavesScene = { blow: startWind, done: stopWind, step, draw, get leaves() { return leaves; }, get phase() { return phase; } };
 
   // ------------------------------------------------------------ connect to the exhibit
   Exhibit.start({
@@ -335,12 +805,12 @@
     title: "Autumn Leaves",
     instructions: "Place your phone flat in the leaf tray, screen up. Then tap the button.",
     demoEvents: ["BLOW", "DONE"],
-    onPlaced() { leaves = []; phase = "calm"; spawnTimer = 0.3; },
+    onPlaced() { leaves = []; dust = []; phase = "calm"; spawnTimer = 0.3; },
     onEvent(cmd) {
       if (cmd === "BLOW") startWind();
       else if (cmd === "DONE") stopWind();
     },
-    onRemoved() { phase = "idle"; leaves = []; streaks = []; },
+    onRemoved() { phase = "idle"; leaves = []; dust = []; },
   });
   document.getElementById("exit").addEventListener("click", () => Exhibit.exit());
 })();
