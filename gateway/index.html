@@ -45,6 +45,21 @@
          padding: 8px 10px; margin: 0; white-space: pre-wrap; word-break: break-word; }
   .in { color: var(--accent); } .out { color: var(--ok); } .err { color: var(--bad); } .sys { color: var(--muted); }
   .empty { color: var(--muted); font-style: italic; }
+  /* QR code: always dark on white, whatever the theme, so every phone camera can read it */
+  .qrwrap { display: flex; gap: 20px; flex-wrap: wrap; align-items: flex-start; }
+  .qrbox { background: #fff; padding: 14px; border-radius: 12px; border: 1px solid var(--line); line-height: 0; }
+  .qrbox img, .qrbox canvas { display: block; }
+  .qrside { flex: 1 1 280px; min-width: 0; }
+  .lbl { display: block; font-size: .8rem; color: var(--muted); margin: 0 0 4px; }
+  .qrside input { width: 100%; margin-bottom: 10px; }
+  .hint.warn { color: var(--warn); }
+  #qrScreen { position: fixed; inset: 0; z-index: 100; background: #fbf6ee; color: #2a1d12; display: none;
+              flex-direction: column; align-items: center; justify-content: center; gap: 2vmin; padding: 24px; cursor: pointer; }
+  #qrScreen.on { display: flex; }
+  #qrScreen h1 { font-size: 6vmin; margin: 0; text-align: center; }
+  #qrScreen p { font-size: 3vmin; margin: 0; color: #6b5a48; text-align: center; }
+  #qrScreen .qrbox { padding: 3vmin; border: 0; box-shadow: 0 10px 40px rgba(0,0,0,.12); }
+  #qrScreen small { position: absolute; bottom: 14px; font-size: 13px; color: #9a8a76; }
 </style>
 </head>
 <body>
@@ -83,6 +98,26 @@
     </table>
   </section>
 
+  <section class="wide">
+    <h2>QR code for phones</h2>
+    <div class="qrwrap">
+      <div class="qrbox" id="qr" aria-label="QR code"></div>
+      <div class="qrside">
+        <label class="lbl" for="qrUrl">Project address</label>
+        <input id="qrUrl" class="mono" spellcheck="false">
+        <label class="lbl" for="qrTitle">Title under the code</label>
+        <input id="qrTitle" value="Autumn Leaves">
+        <div class="row" style="margin-top:12px">
+          <button id="qrFull">Full screen</button>
+          <button id="qrCopy" class="secondary">Copy link</button>
+          <button id="qrOpen" class="secondary">Open</button>
+          <button id="qrReset" class="secondary">Leaves project</button>
+        </div>
+        <p class="hint" id="qrHint">Phones scan this to open the project. For a student's project, paste its GitHub Pages address.</p>
+      </div>
+    </div>
+  </section>
+
   <section>
     <h2>Test without hardware</h2>
     <div class="row">
@@ -104,6 +139,15 @@
   </section>
 </main>
 
+<!-- full-screen QR, for showing on the laptop screen next to the station -->
+<div id="qrScreen" role="dialog" aria-label="QR code, full screen">
+  <h1 id="qrBigTitle"></h1>
+  <div class="qrbox" id="qrBig"></div>
+  <p>Scan with your phone camera</p>
+  <small>Click anywhere or press Esc to go back</small>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <!-- Ably v3 device build (accounts on MAU pricing require v3+). Exposes window.AblyPubSub. -->
 <script src="https://cdn.jsdelivr.net/npm/@ably/pubsub-device@3.0.0/dist/cdn/ably.min.js"></script>
 <script>
@@ -125,6 +169,69 @@
     el.scrollTop = el.scrollHeight;
   }
   $("clearLog").onclick = () => ($("log").textContent = "");
+
+  // ---------------------------------------------------------------- QR code for phones
+  // Default: the leaves project next to this page (…/gateway/ → …/projects/leaves/). Saved in this browser.
+  const QR_STORE = "exhibitGatewayQr";
+  const leavesUrl = () => new URL("../projects/leaves/", location.href).href;
+  function loadQr() { try { return JSON.parse(localStorage.getItem(QR_STORE)) || {}; } catch (_) { return {}; } }
+  function saveQr() { try { localStorage.setItem(QR_STORE, JSON.stringify({ url: $("qrUrl").value, title: $("qrTitle").value })); } catch (_) {} }
+
+  function drawQr(el, text, size) {
+    el.textContent = "";
+    if (!window.QRCode) { el.textContent = "QR library didn't load (no internet?)"; el.style.lineHeight = "1.4"; return; }
+    new QRCode(el, { text, width: size, height: size, colorDark: "#1d1c1a", colorLight: "#ffffff", correctLevel: QRCode.CorrectLevel.M });
+  }
+
+  function updateQr() {
+    const url = $("qrUrl").value.trim();
+    drawQr($("qr"), url || " ", 200);
+    const local = /^(file:|https?:\/\/(localhost|127\.|\[::1\]))/i.test(url);
+    $("qrHint").className = "hint" + (local ? " warn" : "");
+    $("qrHint").textContent = local
+      ? "This address only works on this laptop — phones can't open it. Open the gateway from its GitHub Pages address (…github.io/…/gateway/) and the QR will point to GitHub."
+      : "Phones scan this to open the project. For a student's project, paste its GitHub Pages address.";
+    saveQr();
+  }
+
+  function drawBigQr() {
+    const size = Math.max(240, Math.round(Math.min(innerWidth, innerHeight) * 0.6));
+    drawQr($("qrBig"), $("qrUrl").value.trim() || " ", size);
+  }
+  function showBigQr() {
+    $("qrBigTitle").textContent = $("qrTitle").value;
+    drawBigQr();
+    $("qrScreen").classList.add("on");
+    const el = document.documentElement;
+    if (el.requestFullscreen && !document.fullscreenElement) el.requestFullscreen().catch(() => {});
+  }
+  function hideBigQr() {
+    $("qrScreen").classList.remove("on");
+    if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(() => {});
+  }
+
+  {
+    const saved = loadQr();
+    $("qrUrl").value = saved.url || leavesUrl();
+    if (saved.title) $("qrTitle").value = saved.title;
+    let t;
+    $("qrUrl").addEventListener("input", () => { clearTimeout(t); t = setTimeout(updateQr, 250); });
+    $("qrTitle").addEventListener("input", saveQr);
+    $("qrFull").onclick = showBigQr;
+    $("qrScreen").onclick = hideBigQr;
+    let rt;   // going full screen changes the window size: redraw the big code to fit
+    addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(() => { if ($("qrScreen").classList.contains("on")) drawBigQr(); }, 150); });
+    addEventListener("keydown", (e) => { if (e.key === "Escape") hideBigQr(); });
+    document.addEventListener("fullscreenchange", () => { if (!document.fullscreenElement) $("qrScreen").classList.remove("on"); });
+    $("qrOpen").onclick = () => window.open($("qrUrl").value.trim(), "_blank", "noopener");
+    $("qrReset").onclick = () => { $("qrUrl").value = leavesUrl(); $("qrTitle").value = "Autumn Leaves"; updateQr(); };
+    $("qrCopy").onclick = async () => {
+      try { await navigator.clipboard.writeText($("qrUrl").value.trim()); $("qrCopy").textContent = "Copied"; }
+      catch (_) { $("qrUrl").select(); $("qrCopy").textContent = "Press Ctrl+C"; }
+      setTimeout(() => ($("qrCopy").textContent = "Copy link"), 1500);
+    };
+    updateQr();
+  }
   const light = (id, kind, text) => { $(id + "Light").className = "light " + kind; $(id + "Status").textContent = text; };
 
   // ---------------------------------------------------------------- projects table
@@ -290,7 +397,9 @@
   async function openPort(p) {
     if (port) return;
     try {
-      await p.open({ baudRate: 115200 });
+      // bufferSize: the browser can hold incoming bytes until its read buffer (default 255 bytes) is full,
+      // which delayed micro:bit messages by 6–8 s. A tiny buffer passes every message on immediately.
+      await p.open({ baudRate: 115200, bufferSize: 16 });
     } catch (e) {
       light("usb", "bad", "Could not open: " + e.message);
       log("err", "USB open failed — is another tab or MakeCode using the micro:bit? " + e.message);
