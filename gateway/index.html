@@ -60,6 +60,12 @@
   #qrScreen p { font-size: 3vmin; margin: 0; color: #6b5a48; text-align: center; }
   #qrScreen .qrbox { padding: 3vmin; border: 0; box-shadow: 0 10px 40px rgba(0,0,0,.12); }
   #qrScreen small { position: absolute; bottom: 14px; font-size: 13px; color: #9a8a76; }
+  /* what the gallery staff see: is everything running? */
+  #qrState { position: absolute; top: 14px; left: 0; right: 0; display: flex; gap: 18px; justify-content: center;
+             flex-wrap: wrap; font-size: 14px; color: #6b5a48; }
+  #qrState span { display: inline-flex; align-items: center; gap: 7px; }
+  #qrState i { width: 10px; height: 10px; border-radius: 50%; background: #b9ad9d; }
+  #qrState i.ok { background: #1f8a4c; } #qrState i.warn { background: #b7791f; } #qrState i.bad { background: #c0392b; }
 </style>
 </head>
 <body>
@@ -72,12 +78,17 @@
   <section>
     <h2>1 · Ably (internet relay)</h2>
     <div class="status"><span class="light" id="ablyLight"></span><span id="ablyStatus">Not connected</span></div>
-    <div class="row">
-      <input id="key" style="flex-basis:100%" type="password" autocomplete="off" placeholder="Full Ably key (Root) — xxxx.yyyy:zzzz">
+    <div class="row" id="keyEntry">
+      <input id="key" style="flex-basis:100%" type="password" autocomplete="off" placeholder="Gateway key — xxxx.yyyy:zzzz">
       <button id="saveKey">Connect</button>
+    </div>
+    <div class="row" id="keySaved" hidden>
+      <span>Key saved on this laptop: <span class="mono" id="keyName"></span></span>
+      <button id="replaceKey" class="secondary">Replace key</button>
       <button id="forgetKey" class="secondary">Forget key</button>
     </div>
-    <p class="hint">Use the full (Root) key here. It's saved only in this laptop's browser, never on GitHub.</p>
+    <p class="hint">Use the <b>gateway</b> key (see SETUP.md). It's saved only in this browser on this laptop — never on GitHub —
+      and isn't shown again after it's saved.</p>
   </section>
 
   <section>
@@ -141,6 +152,10 @@
 
 <!-- full-screen QR, for showing on the laptop screen next to the station -->
 <div id="qrScreen" role="dialog" aria-label="QR code, full screen">
+  <div id="qrState" aria-live="polite">
+    <span><i id="qrAbly"></i><b id="qrAblyText">Internet</b></span>
+    <span><i id="qrUsb"></i><b id="qrUsbText">micro:bit</b></span>
+  </div>
   <h1 id="qrBigTitle"></h1>
   <div class="qrbox" id="qrBig"></div>
   <p>Scan with your phone camera</p>
@@ -232,7 +247,17 @@
     };
     updateQr();
   }
-  const light = (id, kind, text) => { $(id + "Light").className = "light " + kind; $(id + "Status").textContent = text; };
+  // status lights; the full-screen QR shows a short version for the gallery staff
+  const STAFF = {
+    ably: { ok: "Internet: connected", warn: "Internet: connecting…", bad: "Internet: not connected", "": "Internet: no key — call the teacher" },
+    usb:  { ok: "micro:bit: ready", warn: "micro:bit: starting…", bad: "micro:bit: problem — unplug it and plug it back in", "": "micro:bit: plug it in" },
+  };
+  const light = (id, kind, text) => {
+    $(id + "Light").className = "light " + kind; $(id + "Status").textContent = text;
+    const big = id === "ably" ? "qrAbly" : "qrUsb";
+    $(big).className = kind; $(big + "Text").textContent = STAFF[id][kind] || text;
+  };
+  light("ably", "", "Not connected"); light("usb", "", "Not connected");
 
   // ---------------------------------------------------------------- projects table
   const projects = new Map(); // name -> {phones:Set, fromMb, toMb}
@@ -311,15 +336,25 @@
     renderProjects();
   }
 
+  // once saved, the key is never put back on screen: only its name (the part before ":", which isn't secret)
+  function showKeySaved(key) {
+    $("key").value = "";
+    $("keyName").textContent = key ? key.split(":")[0] : "";
+    $("keyEntry").hidden = !!key; $("keySaved").hidden = !key;
+  }
   $("saveKey").onclick = () => {
     const key = $("key").value.trim();
     if (!/^[^.:\s]+\.[^.:\s]+:\S+$/.test(key)) { alert("That doesn't look like an Ably key (xxxx.yyyy:zzzz)."); return; }
     try { localStorage.setItem(KEY_STORE, key); } catch (_) {}
+    showKeySaved(key);
     connectAbly(key);
   };
+  $("key").addEventListener("keydown", (e) => { if (e.key === "Enter") $("saveKey").click(); });
+  $("replaceKey").onclick = () => { $("keyEntry").hidden = false; $("keySaved").hidden = true; $("key").focus(); };
   $("forgetKey").onclick = () => {
+    if (!confirm("Remove the Ably key from this laptop? Phones will stop working until someone enters it again.")) return;
     try { localStorage.removeItem(KEY_STORE); } catch (_) {}
-    $("key").value = "";
+    showKeySaved(null);
     if (ably) ably.close();
     light("ably", "", "Not connected");
     log("sys", "Key removed from this laptop");
@@ -496,7 +531,8 @@
 
   let saved = null;
   try { saved = localStorage.getItem(KEY_STORE); } catch (_) {}
-  if (saved) { $("key").value = saved; connectAbly(saved); }
+  showKeySaved(saved);
+  if (saved) connectAbly(saved);
   log("sys", "Gateway page ready");
 })();
 </script>
