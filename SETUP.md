@@ -13,14 +13,16 @@ test/index.html            network check
 lib/exhibit.js             shared helper every phone page loads (placing, station claim, Exit button logic)
 lib/config.js              the LIMITED phone key goes here
 gateway/index.html         laptop page (Ably + USB to the gateway micro:bit)
+gateway/gallery-shortcut.ps1  puts an "Exhibit gateway" shortcut on a gallery laptop's desktop (no key inside)
 projects/leaves/index.html Autumn Leaves phone page
+projects/leaves/forest-floor.webp  background photo (upload it together with the page)
 microbit/*.ts              MakeCode programs (paste into MakeCode; harmless if also on GitHub)
 ```
 
 How a message travels:
 
 ```
-button A → leaves micro:bit ──radio "leaves:BLOW"──► gateway micro:bit ──USB──► laptop gateway page
+button A / P1 → leaves micro:bit ──radio "leaves:BLOW"──► gateway micro:bit ──USB──► laptop gateway page
          ──Ably channel "exhibit:leaves"──► phone page → leaves blow
 phone "in place" ──Ably presence──► laptop ──USB──► gateway ──radio "leaves:PLACED"──► leaves micro:bit shows 🙂
 ```
@@ -40,13 +42,16 @@ Tap **My phone is in place**, then use the **BLOW** / **DONE** buttons at the bo
 ## 2. Ably account (once, ~5 minutes)
 
 1. Sign up (free) at **ably.com** and create an app (ours: `Interactive gateway #1`).
-2. Open the app → **API Keys**.
-   - The existing **Root** key is the **laptop key**. Never put it in any file, on GitHub, or in a chat.
+2. Open the app → **API Keys**. The existing **Root** key can do everything — keep it for yourself and use it
+   nowhere in the exhibition. Never put it in any file, on GitHub, or in a chat.
 3. Create a new key named `phones`:
    - Capabilities: tick **Publish**, **Subscribe** and **Presence**.
    - Channel restrictions: add **two separate entries**, `exhibit:*` and `phone`
      (not one entry with both — that gives *"Channel denied access based on given capability"* on the phone).
 4. Copy the `phones` key into **`lib/config.js`** (replace `PASTE_PHONE_KEY_HERE`) and upload that file to GitHub.
+5. Create one more key named `gateway`, with exactly the same settings as `phones`. This is the **laptop key**:
+   it goes only into the gateway page on the laptop. Having its own key means that if it ever gets out, you
+   **revoke just that key** in Ably and make a new one — the phones and your Root key aren't affected.
 
 **Ably library:** new Ably accounts use "MAU" pricing (monthly active users) and only accept the v3
 library `@ably/pubsub-device`. All pages already use it. If you ever see *"This version of the Ably SDK is not
@@ -85,16 +90,26 @@ command ≤ 8 capitals/digits/_). Project micro:bits send every message twice; t
 **Why the gateway program pads messages with spaces:** the micro:bit's USB chip holds short messages back
 until it has a full 64-byte packet, which delayed BLOW by ~5–10 s (it arrived together with DONE).
 Every message is now followed by a line of spaces that pushes it out immediately. Keep this in any
-modified gateway program.
+modified gateway program. The gateway page also opens the USB port with a tiny read buffer (`bufferSize: 16`):
+with the browser's default (255 bytes) messages arrived in bursts every 6–8 s.
 
 ### Wiring the leaves station
 
-**Button** — the micro:bit's own **button A**. Nothing to wire.
-(The Gravity push button on P1 was unreliable in testing. If you use one, it sends **1 when pressed** —
-use `pins.digitalReadPin(DigitalPin.P1) == 1` with `PinPullMode.PullNone`.)
+All on a **DFRobot micro:bit shield** (Gravity 3-pin plugs: match the cable colours to the pin colours —
+green/blue = signal, red = power, black = GND).
 
-**Fan** — DFRobot micro:bit shield + **Gravity fan module** plugged into **P8**.
-If the fan runs when it should be off, change `FAN_ON` to `0` in the station program.
+| Part | Plug into | Notes |
+|---|---|---|
+| micro:bit **button A** | — | always works, nothing to wire |
+| **Gravity: Digital Push Button** (DFR0029) | **P1** | reads **1 while pressed**; either button starts the wind |
+| **Gravity: 130 DC Motor Module** (DFR0411) | **P2** | built-in driver, PWM speed; needs **5 V** |
+
+- **Motor power:** the motor module needs 5 V. Power the shield from its own power input (battery/USB on
+  the shield), not only through the micro:bit's USB — and if the shield has a 3V/5V selector for the
+  Gravity pins, set it to **5V**. Too little power = the motor twitches, or the micro:bit restarts when it starts.
+- **Speed:** `MOTOR_SPEED` in the station program, 0 … 1023 (try 600–800 for a gentler wind).
+- **Motor starts by itself / button does nothing:** the button reads the other way — change `PRESSED` to `0`.
+- Holding a button runs the motor only once; release it to press again.
 
 Other motors: never wire a motor straight to the micro:bit; it needs a driver.
 With an **L9110S fan/motor module** (or similar):
@@ -115,12 +130,48 @@ source/emitter to GND, a diode across the motor (stripe towards +), shared groun
 
 1. Close all MakeCode tabs. Plug in the gateway micro:bit.
 2. Open `https://<username>.github.io/Base44-Test/gateway/` in **Chrome or Edge** (Web Serial doesn't work in other browsers).
-3. Paste the **Root** key → **Connect** (saved in this browser only; **Forget key** removes it).
+3. Paste the **gateway** key → **Connect**. It's saved in this browser only and never shown again
+   (only its name, the part before `:`). **Replace key** / **Forget key** change or remove it.
 4. **Connect micro:bit** → pick the micro:bit. Status should say **Connected — gateway ready**,
    and the log shows *"gateway micro:bit answered"*. Next time the page reconnects by itself.
 5. Keep the gateway page open the whole exhibition (other tabs in front are fine). Disable laptop sleep.
 
 The **Test without hardware** box lets you pretend a micro:bit sent `leaves:BLOW`, to check a phone reacts.
+
+### A gallery laptop (when you can't be there)
+
+Set it up once; afterwards whoever opens the gallery **double-clicks "Exhibit gateway" on the desktop and plugs in
+the gateway micro:bit**. It opens in an ordinary window, already connected. They never see or type the key.
+
+1. Copy `gateway/gallery-shortcut.ps1` onto the gallery laptop (e.g. download it from GitHub).
+2. Right-click it → **Run with PowerShell**, and enter the gateway address
+   (`https://<username>.github.io/Base44-Test/gateway/`). It puts an **Exhibit gateway** shortcut on the desktop.
+3. Double-click the shortcut: paste the gateway key → **Connect**; plug in the gateway micro:bit →
+   **Connect micro:bit** → pick it.
+4. Close it and open the shortcut again to check: both lights turn green by themselves.
+
+The shortcut uses its own browser profile (a folder in `%LOCALAPPDATA%\ExhibitGateway`), so the key and the
+USB permission stay there, apart from anyone's normal browsing — and the key isn't in any file you send.
+Opening the gateway any other way (another browser, a bookmark in normal Chrome) won't have the key.
+
+For the person opening the gallery:
+
+| Gateway page shows | What to do |
+|---|---|
+| Ably *Connected* · micro:bit *Connected — gateway ready* | nothing — it works; **Full screen** under the QR code shows it big for visitors (optional) |
+| micro:bit *Not connected* | plug the gateway micro:bit in (it connects by itself) |
+| micro:bit *problem* / *no reply* | unplug it and plug it back in |
+| Ably *Offline* / *Reconnecting* | check the laptop's Wi-Fi |
+| No key saved (a key box is showing) | call the teacher — the key has to be entered again (step 3) |
+
+The full-screen QR shows the same two things in plain words at the top (*Internet: connected*, *micro:bit: ready*).
+Keep the window open all day; the page keeps the screen awake. To undo: open the shortcut and press
+**Forget key** (this is the reliable way to remove the key — security software on many laptops refuses to let
+anything but the browser delete a browser profile folder), then run
+`powershell -ExecutionPolicy Bypass -File gallery-shortcut.ps1 -Remove` to remove the shortcut.
+
+Not totally secret: someone who knows browser developer tools could still dig the key out of that laptop's
+browser. That's why it's a separate `gateway` key — if in doubt, revoke it in Ably and enter a new one.
 
 ### Reading the gateway log
 
@@ -137,7 +188,7 @@ The **Test without hardware** box lets you pretend a micro:bit sent `leaves:BLOW
 
 1. Gateway page: Ably dot green, USB *gateway ready*.
 2. Phone: open the project, tap **My phone is in place** → log `→ radio leaves:PLACED`, station shows 🙂.
-3. Press button A → station shows ≡, fan spins 5 s; log shows BLOW at once and DONE 5 s later; leaves blow on the phone within ~1 s.
+3. Press button A (then also the P1 button) → station shows ≡, motor spins 5 s; log shows BLOW at once and DONE 5 s later; leaves blow on the phone within ~1 s.
 4. Press again after 🙂 returns — it should work every time.
 5. Tap **Exit** on the phone → log `→ radio leaves:LEFT`, station shows 💤.
 
